@@ -7,7 +7,7 @@ npm install -g @referalli/cli     # or: npx @referalli/cli <command>
 referalli login
 ```
 
-Requires Node.js 18.18 or later.
+Requires Node.js 20 or later.
 
 ## Sign in
 
