@@ -1,0 +1,57 @@
+{
+  "name": "@referalli/cli",
+  "version": "0.1.0",
+  "description": "The Referalli command line: sign in, forward webhooks to localhost, trigger test events, tail events and API logs.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18.18"
+  },
+  "bin": {
+    "referalli": "./dist/bin/referalli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "keywords": [
+    "referalli",
+    "cli",
+    "webhooks",
+    "referral",
+    "affiliate"
+  ],
+  "homepage": "https://referalli.com/docs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Referalli/referalli-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Referalli/referalli-cli/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/bin/referalli.js",
+    "prepack": "npm run build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "start": "tsx bin/referalli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^3.0.0"
+  }
+}
