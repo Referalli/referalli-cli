@@ -47,7 +47,8 @@ describe('referalli CLI', () => {
     expect(await runCli(['login', '--key', 'rk_abc', '--base-url', 'http://api.test/'], t.io)).toBe(0);
     const file = join(env.REFERALLI_CONFIG_DIR, 'cli.json');
     expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ baseUrl: 'http://api.test', key: 'rk_abc', orgId: 'org_1', orgName: 'Acme' });
-    expect(statSync(file).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX permission bits (chmod 0o600 reads back as 0o666 there).
+    if (process.platform !== 'win32') expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(api.calls[0]!.headers.authorization).toBe('Bearer rk_abc');
   });
 
@@ -181,6 +182,38 @@ describe('referalli CLI', () => {
     expect(t.out.at(-1)).toBe(body);
     expect(api.calls.filter((c) => c.method === 'DELETE')).toHaveLength(2);
     expect(await runCli(['events', 'list'], t.io)).toBe(1);
+  });
+
+  it('events tail --since backfills from /v1/events page by page, then tails live without repeats (REF-H15)', async () => {
+    const env = { ...tempEnv(), REFERALLI_API_KEY: 'rk_x', REFERALLI_API_URL: 'http://api.test' };
+    const ev = (id: string) => ({ id, topic: 'commission.earned', orgId: 'org_1', livemode: true, createdAt: '2026-10-23T10:00:00.000Z', data: { partnerId: 'prt_1' } });
+    const pages: string[] = [];
+    const api = fakeApi({
+      'POST /v1/cli/listeners': () => ({ id: 'cli_3', secret: 'whsec_x', topics: ['commission.earned'] }),
+      'GET /v1/events': (_b, url) => {
+        pages.push(url);
+        return new URL(url).searchParams.get('after')
+          ? { events: [ev('evt_2')], hasMore: false, nextCursor: null }
+          : { events: [ev('evt_1')], hasMore: true, nextCursor: 'evt_1' };
+      },
+      'GET /v1/cli/listeners/cli_3/events': () => ({
+        events: [
+          { id: 'cle_a', eventId: 'evt_2', topic: 'commission.earned', body: '{}', headers: {} },
+          { id: 'cle_b', eventId: 'evt_3', topic: 'commission.earned', body: '{}', headers: {} },
+        ],
+      }),
+      'DELETE /v1/cli/listeners/cli_3': () => ({ ok: true }),
+    });
+    const t = io(env, api.fetchFn);
+    expect(await runCli(['events', 'tail', '--events', 'commission.earned', '--since', '2h', '--max', '3'], t.io)).toBe(0);
+    expect(pages).toHaveLength(2);
+    const first = new URL(pages[0]!).searchParams;
+    expect(first.get('topics')).toBe('commission.earned');
+    expect(Date.parse(first.get('since')!)).toBeLessThan(Date.now() - 7_100_000);
+    expect(new URL(pages[1]!).searchParams.get('after')).toBe('evt_1');
+    const lines = t.out.filter((l) => l.includes('evt_'));
+    expect(lines.map((l) => /evt_\d/.exec(l)![0])).toEqual(['evt_1', 'evt_2', 'evt_3']);
+    expect(await runCli(['events', 'tail', '--since', 'yesterday-ish'], t.io)).toBe(1);
   });
 
   it('open prints or opens the page on the configured host', async () => {

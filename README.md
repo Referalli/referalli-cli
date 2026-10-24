@@ -45,6 +45,7 @@ A triggered event is sent to every running `listen` session and to your webhook 
 ```sh
 referalli events tail                         # every event, one line each
 referalli events tail --events payout.sent --json   # full event bodies, for piping into jq
+referalli events tail --since 2h                # backfill the last two hours, then tail live
 referalli logs tail                           # your API requests: method, path, status, latency
 ```
 

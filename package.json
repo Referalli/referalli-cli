@@ -1,6 +1,6 @@
 {
   "name": "@referalli/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "The Referalli command line: sign in, forward webhooks to localhost, trigger test events, tail events and API logs.",
   "license": "MIT",
   "type": "module",

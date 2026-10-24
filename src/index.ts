@@ -16,7 +16,7 @@ Usage:
   referalli whoami
   referalli listen [--forward-to URL] [--events topic,topic] [--max-events N]
   referalli trigger <topic> [--data JSON]
-  referalli events tail [--events topic,topic] [--json] [--max N]
+  referalli events tail [--events topic,topic] [--since 1h|ISO] [--json] [--max N]
   referalli logs tail [--max N]
   referalli open [docs|dashboard|keys|webhooks|spec|status]
   referalli api <METHOD> <path> [--data JSON]
@@ -43,6 +43,7 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         'no-browser': { type: 'boolean' },
         'forward-to': { type: 'string' },
         events: { type: 'string' },
+        since: { type: 'string' },
         'max-events': { type: 'string' },
         max: { type: 'string' },
         wait: { type: 'string' },

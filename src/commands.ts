@@ -175,9 +175,31 @@ export async function eventsTail(io: Io, flags: Flags): Promise<number> {
   const topics = typeof flags.events === 'string' ? flags.events.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
   const max = typeof flags.max === 'string' ? Number(flags.max) : Infinity;
   const wait = typeof flags.wait === 'string' ? Number(flags.wait) : 20;
+  const since = typeof flags.since === 'string' ? parseSince(flags.since, new Date()) : null;
+  // Open the listener first so nothing emitted during the backfill is missed.
   const listener = await client.request<{ id: string; topics: string[] }>('POST', '/v1/cli/listeners', topics ? { topics } : {});
-  if (!flags.json) io.err(`Tailing ${listener.topics.join(', ')} (Ctrl-C to stop)…`);
   let seen = 0;
+  const backfilled = new Set<string>();
+  if (since) {
+    if (!flags.json) io.err(`Events since ${since.toISOString()}:`);
+    let after: string | null = null;
+    do {
+      const qs = new URLSearchParams({ since: since.toISOString(), limit: '100' });
+      if (topics) qs.set('topics', topics.join(','));
+      if (after) qs.set('after', after);
+      const page: EventsPage = await client.request<EventsPage>('GET', `/v1/events?${qs.toString()}`, undefined, { signal: io.signal });
+      for (const e of page.events) {
+        if (seen >= max) break;
+        seen++;
+        backfilled.add(e.id);
+        const body = JSON.stringify(e);
+        if (flags.json) io.out(body);
+        else io.out(`${time(new Date(e.createdAt))}  ${e.topic.padEnd(24)} ${e.id}${summarize(body)}`);
+      }
+      after = page.nextCursor;
+    } while (after && seen < max && !io.signal.aborted);
+  }
+  if (!flags.json) io.err(`Tailing ${listener.topics.join(', ')} (Ctrl-C to stop)…`);
   try {
     while (!io.signal.aborted && seen < max) {
       let batch: ListenerEvent[];
@@ -194,6 +216,7 @@ export async function eventsTail(io: Io, flags: Flags): Promise<number> {
         continue;
       }
       for (const e of batch) {
+        if (backfilled.has(e.eventId)) continue; // already printed by the backfill
         seen++;
         if (flags.json) io.out(e.body);
         else io.out(`${time(new Date())}  ${e.topic.padEnd(24)} ${e.eventId}${summarize(e.body)}`);
@@ -204,6 +227,23 @@ export async function eventsTail(io: Io, flags: Flags): Promise<number> {
     await client.request('DELETE', `/v1/cli/listeners/${listener.id}`).catch(() => {});
   }
   return 0;
+}
+
+interface EventsPage {
+  events: Array<{ id: string; topic: string; createdAt: string; data: Record<string, unknown> }>;
+  nextCursor: string | null;
+}
+
+/** `--since`: an ISO time, or a duration back from now (`30m`, `2h`, `7d`). */
+export function parseSince(raw: string, now: Date): Date {
+  const m = /^(\d+)\s*([mhd])$/i.exec(raw.trim());
+  if (m) {
+    const unit = { m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2]!.toLowerCase() as 'm' | 'h' | 'd'];
+    return new Date(now.getTime() - Number(m[1]) * unit);
+  }
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) throw new CliError('--since takes a duration (30m, 2h, 7d) or an ISO 8601 time');
+  return d;
 }
 
 /** A short "key=value" tail for an event line: the ids and amounts a developer looks for. */
