@@ -5,6 +5,10 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.3.2 - 2026-11-02
+
+- `apply` sends `waitForCustomer` under `stripeCredits` (the API replaces all credit settings on save, so leaving it out turns it off; the plan shows it).
+
 ## 0.3.1 - 2026-11-02
 
 - Fixed: `apply` accepts `balanceCurrency` and `createCustomerIfMissing` under `stripeCredits`. Before, it refused them, and applying a file to a program that had them set turned them off without showing it in the plan.

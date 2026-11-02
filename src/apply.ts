@@ -42,7 +42,7 @@ const PROGRAM_TOP = ['name', 'attributionModel', 'cookieWindowDays', 'signupToCo
 // Program settings: PATCH takes them top-level, GET returns them under `settings`.
 const PROGRAM_SETTINGS = ['probabilisticPolicy', 'selfReferralPolicy', 'splitCommissions', 'allowPaidSearch', 'challengeLinks', 'settlement'] as const;
 const PROGRAM_KEYS = ['slug', ...PROGRAM_TOP, ...PROGRAM_SETTINGS, 'destinationUrl', 'commissionRule', 'stripeCredits'];
-const STRIPE_KEYS = ['enabled', 'referrerMatch', 'metadataKey', 'refereeRewards', 'balanceCurrency', 'createCustomerIfMissing', 'secretKeyEnv'];
+const STRIPE_KEYS = ['enabled', 'referrerMatch', 'metadataKey', 'refereeRewards', 'balanceCurrency', 'createCustomerIfMissing', 'waitForCustomer', 'secretKeyEnv'];
 const WEBHOOK_KEYS = ['url', 'topics', 'programs', 'status', 'alertContacts'];
 const API_KEY_KEYS = ['name', 'owner', 'mode', 'scopes', 'expiresInDays', 'programs', 'apiVersion'];
 // What the API stores when a rule leaves these out (packages/commissions ruleConfigSchema).
@@ -243,6 +243,7 @@ export async function buildPlan(client: Client, config: ApplyConfig, env: NodeJS
         refereeRewards: s.refereeRewards ?? false,
         balanceCurrency: typeof s.balanceCurrency === 'string' ? s.balanceCurrency.toLowerCase() : null,
         createCustomerIfMissing: s.createCustomerIfMissing ?? null,
+        waitForCustomer: s.waitForCustomer ?? false,
       };
       const curS = cur ? await client.request<Obj & { hasOwnKey: boolean }>('GET', `/v1/programs/${cur.id}/stripe-credits`) : null;
       const fields: Field[] = Object.keys(want)

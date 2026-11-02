@@ -50,7 +50,7 @@ function fakeAccount() {
         const had = db.credits.get(pid)?.hasOwnKey === true;
         db.credits.set(pid, { id: pid, ...rest, metadataKey: rest.metadataKey ?? null, balanceCurrency: rest.balanceCurrency ?? null, createCustomerIfMissing: rest.createCustomerIfMissing ?? null, hasOwnKey: had || Boolean(secretKey) });
       }
-      return ok(db.credits.get(pid) ?? { id: pid, enabled: false, referrerMatch: 'billing_link', metadataKey: null, refereeRewards: false, balanceCurrency: null, createCustomerIfMissing: null, hasOwnKey: false });
+      return ok(db.credits.get(pid) ?? { id: pid, enabled: false, referrerMatch: 'billing_link', metadataKey: null, refereeRewards: false, balanceCurrency: null, createCustomerIfMissing: null, waitForCustomer: false, hasOwnKey: false });
     }
     if (route === 'GET /v1/webhook-endpoints') return ok(db.hooks);
     if (route === 'POST /v1/webhook-endpoints') {
@@ -219,6 +219,22 @@ describe('referalli plan / apply', () => {
     const without = harness(acct, ENV);
     expect(await runCli(['plan', writeConfig(), '--check'], without.io)).toBe(2);
     expect(without.text()).toContain('    balanceCurrency: "eur" → null');
+  });
+
+  it('sends waitForCustomer on every PUT, so leaving it out of the file shows as turning it off', async () => {
+    const acct = fakeAccount();
+    const waiting = writeConfig(YAML.replace('secretKeyEnv: STRIPE_CREDIT_KEY', 'secretKeyEnv: STRIPE_CREDIT_KEY\n      waitForCustomer: true'));
+    expect(await runCli(['apply', waiting], harness(acct, ENV).io)).toBe(0);
+    const put = acct.calls.find((c) => c.method === 'PUT' && c.path.endsWith('/stripe-credits'))!;
+    expect(put.body).toMatchObject({ waitForCustomer: true });
+
+    const again = harness(acct, ENV);
+    expect(await runCli(['plan', waiting, '--check'], again.io)).toBe(0);
+    expect(again.text()).toContain('= unchanged stripeCredits "pro"');
+
+    const without = harness(acct, ENV);
+    expect(await runCli(['plan', writeConfig(), '--check'], without.io)).toBe(2);
+    expect(without.text()).toContain('    waitForCustomer: true → false');
   });
 
   it('--secret-file writes new secrets to a 0600 file and keeps them off the terminal', async () => {
