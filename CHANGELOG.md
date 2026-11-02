@@ -5,6 +5,10 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.3.1 - 2026-11-02
+
+- Fixed: `apply` accepts `balanceCurrency` and `createCustomerIfMissing` under `stripeCredits`. Before, it refused them, and applying a file to a program that had them set turned them off without showing it in the plan.
+
 ## 0.3.0 - 2026-11-02
 
 - `trigger --stripe <event> --connection <id> [--data JSON]`: send a Stripe event fixture into a test-mode billing connection (`POST /v1/sandbox/stripe-fixtures`) and print the commissions it created.
