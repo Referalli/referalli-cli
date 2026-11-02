@@ -287,7 +287,8 @@ export async function open(io: Io, target: string | undefined, flags: Flags): Pr
 
 export async function trigger(io: Io, topic: string | undefined, flags: Flags): Promise<number> {
   const { client } = signedIn(io);
-  if (typeof flags.stripe === 'string') return triggerStripe(io, client, flags.stripe, flags);
+  if (typeof flags.billing === 'string') return triggerBilling(io, client, flags.billing, flags, 'billing');
+  if (typeof flags.stripe === 'string') return triggerBilling(io, client, flags.stripe, flags, 'stripe');
   if (!topic) {
     const { topics } = await client.request<{ topics: string[] }>('GET', '/v1/cli/topics');
     throw new CliError(`Usage: referalli trigger <topic>. Topics: ${topics.join(', ')}`);
@@ -309,10 +310,13 @@ export async function trigger(io: Io, topic: string | undefined, flags: Flags): 
   return 0;
 }
 
-/** `trigger --stripe <event> --connection <id> [--data overrides]`: a Stripe fixture into a test-mode billing connection. */
-async function triggerStripe(io: Io, client: Client, event: string, flags: Flags): Promise<number> {
+/**
+ * `trigger --billing <event> --connection <id> [--data overrides]`: a provider event fixture into a
+ * test-mode billing connection (the provider is the connection's). `--stripe` is the Stripe-only original.
+ */
+async function triggerBilling(io: Io, client: Client, event: string, flags: Flags, flag: 'billing' | 'stripe'): Promise<number> {
   if (typeof flags.connection !== 'string') {
-    throw new CliError('Usage: referalli trigger --stripe <event> --connection <billing connection id> [--data JSON]');
+    throw new CliError(`Usage: referalli trigger --${flag} <event> --connection <billing connection id> [--data JSON]`);
   }
   let overrides: Record<string, unknown> = {};
   if (typeof flags.data === 'string') {
@@ -324,13 +328,21 @@ async function triggerStripe(io: Io, client: Client, event: string, flags: Flags
   }
   // `eventId` in --data replays that event instead of sending a new one.
   const { eventId, ...rest } = overrides;
-  const res = await client.request<{ eventId: string; received: number; results: Array<{ duplicate: boolean }>; commissions: Array<{ id: string; type: string; amountMinor: number; currency: string }> }>(
+  const res = await client.request<{
+    eventId: string;
+    provider?: string;
+    nativeEvent?: string;
+    received: number;
+    results: Array<{ duplicate: boolean }>;
+    commissions: Array<{ id: string; type: string; amountMinor: number; currency: string }>;
+  }>(
     'POST',
-    '/v1/sandbox/stripe-fixtures',
+    `/v1/sandbox/${flag}-fixtures`,
     { connectionId: flags.connection, event, overrides: rest, ...(eventId !== undefined ? { eventId } : {}) },
   );
   const dup = res.results.some((r) => r.duplicate) ? ' (duplicate)' : '';
-  io.out(`Sent ${event} [${res.eventId}]${dup}: ${res.received} billing event(s), ${res.commissions.length} commission event(s).`);
+  const what = flag === 'billing' && res.provider ? `${event} (${res.provider} ${res.nativeEvent})` : event;
+  io.out(`Sent ${what} [${res.eventId}]${dup}: ${res.received} billing event(s), ${res.commissions.length} commission event(s).`);
   for (const c of res.commissions) io.out(`  ${c.type}  ${c.amountMinor} ${c.currency}  ${c.id}`);
   return 0;
 }

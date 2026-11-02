@@ -16,6 +16,7 @@ Usage:
   referalli whoami
   referalli listen [--forward-to URL] [--events topic,topic] [--max-events N]
   referalli trigger <topic> [--data JSON]
+  referalli trigger --billing <event> --connection <id> [--data JSON]  (test mode; e.g. payment.paid)
   referalli trigger --stripe <event> --connection <id> [--data JSON]   (test mode)
   referalli events tail [--events topic,topic] [--since 1h|ISO] [--json] [--max N]
   referalli logs tail [--max N]
@@ -52,6 +53,7 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         wait: { type: 'string' },
         data: { type: 'string' },
         stripe: { type: 'string' },
+        billing: { type: 'string' },
         connection: { type: 'string' },
         'secret-file': { type: 'string' },
         name: { type: 'string' },

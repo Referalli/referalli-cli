@@ -172,6 +172,29 @@ describe('referalli CLI', () => {
     expect(t.err.at(-1)).toContain('--connection');
   });
 
+  it('trigger --billing sends a provider-neutral fixture to the billing sandbox endpoint', async () => {
+    const env = { ...tempEnv(), REFERALLI_API_KEY: 'rk_test_x', REFERALLI_API_URL: 'http://api.test' };
+    const api = fakeApi({
+      'POST /v1/sandbox/billing-fixtures': () => ({
+        eventId: 'shopify_order_55',
+        provider: 'shopify',
+        nativeEvent: 'orders/paid',
+        received: 1,
+        results: [{ duplicate: false }],
+        commissions: [{ id: 'cev_2', type: 'earned', amountMinor: 980, currency: 'usd' }],
+      }),
+    });
+    const t = io(env, api.fetchFn);
+    expect(await runCli(['trigger', '--billing', 'payment.paid', '--connection', 'bcon_2', '--data', '{"customerRef":"77","invoiceId":"55"}'], t.io)).toBe(0);
+    expect(api.calls.at(-1)!.body).toEqual({ connectionId: 'bcon_2', event: 'payment.paid', overrides: { customerRef: '77', invoiceId: '55' } });
+    expect(t.out.slice(-2)).toEqual([
+      'Sent payment.paid (shopify orders/paid) [shopify_order_55]: 1 billing event(s), 1 commission event(s).',
+      '  earned  980 usd  cev_2',
+    ]);
+    expect(await runCli(['trigger', '--billing', 'payment.paid'], t.io)).toBe(1);
+    expect(t.err.at(-1)).toContain('--billing <event> --connection');
+  });
+
   it('api --secret-file writes a once-shown secret to a 0600 file and keeps it off the terminal', async () => {
     const env = { ...tempEnv(), REFERALLI_API_KEY: 'k', REFERALLI_API_URL: 'http://api.test' };
     const api = fakeApi({ 'POST /v1/billing/connections': () => ({ id: 'bcon_1', webhookSecret: 'whsec_shh' }) });
