@@ -1,5 +1,6 @@
 import { chmodSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
+import { ConfigError, runApply } from './apply.js';
 import { ApiError, createClient, type Client, type FetchFn } from './client.js';
 import { DEFAULT_BASE_URL, readConfig, removeConfig, writeConfig, type CliConfig } from './config.js';
 
@@ -286,6 +287,7 @@ export async function open(io: Io, target: string | undefined, flags: Flags): Pr
 
 export async function trigger(io: Io, topic: string | undefined, flags: Flags): Promise<number> {
   const { client } = signedIn(io);
+  if (typeof flags.stripe === 'string') return triggerStripe(io, client, flags.stripe, flags);
   if (!topic) {
     const { topics } = await client.request<{ topics: string[] }>('GET', '/v1/cli/topics');
     throw new CliError(`Usage: referalli trigger <topic>. Topics: ${topics.join(', ')}`);
@@ -304,6 +306,32 @@ export async function trigger(io: Io, topic: string | undefined, flags: Flags): 
     { topic, ...(data ? { data } : {}) },
   );
   io.out(`Triggered ${topic} [${res.eventId}]: ${res.deliveredTo.listeners} listener(s), ${res.deliveredTo.endpoints} webhook endpoint(s).`);
+  return 0;
+}
+
+/** `trigger --stripe <event> --connection <id> [--data overrides]`: a Stripe fixture into a test-mode billing connection. */
+async function triggerStripe(io: Io, client: Client, event: string, flags: Flags): Promise<number> {
+  if (typeof flags.connection !== 'string') {
+    throw new CliError('Usage: referalli trigger --stripe <event> --connection <billing connection id> [--data JSON]');
+  }
+  let overrides: Record<string, unknown> = {};
+  if (typeof flags.data === 'string') {
+    try {
+      overrides = JSON.parse(flags.data) as Record<string, unknown>;
+    } catch {
+      throw new CliError('--data must be a JSON object, e.g. --data \'{"customerRef": "cus_123", "amountMinor": 4900}\'');
+    }
+  }
+  // `eventId` in --data replays that event instead of sending a new one.
+  const { eventId, ...rest } = overrides;
+  const res = await client.request<{ eventId: string; received: number; results: Array<{ duplicate: boolean }>; commissions: Array<{ id: string; type: string; amountMinor: number; currency: string }> }>(
+    'POST',
+    '/v1/sandbox/stripe-fixtures',
+    { connectionId: flags.connection, event, overrides: rest, ...(eventId !== undefined ? { eventId } : {}) },
+  );
+  const dup = res.results.some((r) => r.duplicate) ? ' (duplicate)' : '';
+  io.out(`Sent ${event} [${res.eventId}]${dup}: ${res.received} billing event(s), ${res.commissions.length} commission event(s).`);
+  for (const c of res.commissions) io.out(`  ${c.type}  ${c.amountMinor} ${c.currency}  ${c.id}`);
   return 0;
 }
 
@@ -452,3 +480,22 @@ export async function api(io: Io, method: string | undefined, path: string | und
 }
 
 const SECRET_FIELDS = ['webhookSecret', 'secret', 'key'] as const;
+
+// --- plan / apply ------------------------------------------------------------------
+
+/** `referalli plan <file>` / `referalli apply <file> [--plan] [--check] [--secret-file PATH]`. */
+export async function apply(io: Io, file: string | undefined, flags: Flags, planOnly: boolean): Promise<number> {
+  if (!file) throw new CliError(planOnly ? 'Usage: referalli plan <referalli.yaml> [--check]' : 'Usage: referalli apply <referalli.yaml> [--plan] [--check] [--secret-file PATH]');
+  const { client } = signedIn(io);
+  try {
+    return await runApply(io, client, file, {
+      apply: !planOnly && !flags.plan,
+      check: flags.check === true,
+      secretFile: typeof flags['secret-file'] === 'string' ? flags['secret-file'] : undefined,
+    });
+  } catch (err) {
+    if (err instanceof ConfigError) throw new CliError(err.message);
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new CliError(`${file}: no such file`);
+    throw err;
+  }
+}

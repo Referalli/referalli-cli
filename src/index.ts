@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util';
 import { ApiError } from './client.js';
-import { api, CliError, eventsTail, keys, login, listen, logout, logsTail, open, trigger, whoami, type Flags, type Io } from './commands.js';
+import { api, apply, CliError, eventsTail, keys, login, listen, logout, logsTail, open, trigger, whoami, type Flags, type Io } from './commands.js';
 import { VERSION } from './version.js';
 
 export { readConfig, writeConfig, configPath, type CliConfig } from './config.js';
@@ -16,6 +16,7 @@ Usage:
   referalli whoami
   referalli listen [--forward-to URL] [--events topic,topic] [--max-events N]
   referalli trigger <topic> [--data JSON]
+  referalli trigger --stripe <event> --connection <id> [--data JSON]   (test mode)
   referalli events tail [--events topic,topic] [--since 1h|ISO] [--json] [--max N]
   referalli logs tail [--max N]
   referalli open [docs|dashboard|keys|webhooks|spec|status]
@@ -23,6 +24,8 @@ Usage:
   referalli keys create --name NAME [--owner WHO] [--mode both|live|test] [--scopes full,…] [--expires-days N]
   referalli keys list [--owner WHO] [--mode live|test]
   referalli keys revoke <key id> [--pair] [--cascade]
+  referalli plan <referalli.yaml> [--check]
+  referalli apply <referalli.yaml> [--plan] [--check] [--secret-file PATH]
 
 Environment:
   REFERALLI_API_KEY   use this key instead of the saved login
@@ -48,6 +51,8 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         max: { type: 'string' },
         wait: { type: 'string' },
         data: { type: 'string' },
+        stripe: { type: 'string' },
+        connection: { type: 'string' },
         'secret-file': { type: 'string' },
         name: { type: 'string' },
         owner: { type: 'string' },
@@ -56,6 +61,8 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         'expires-days': { type: 'string' },
         pair: { type: 'boolean' },
         cascade: { type: 'boolean' },
+        plan: { type: 'boolean' },
+        check: { type: 'boolean' },
         json: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
@@ -103,6 +110,9 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         return await api(io, rest[0], rest[1], flags);
       case 'keys':
         return await keys(io, rest[0], rest[1], flags);
+      case 'plan':
+      case 'apply':
+        return await apply(io, rest[0], flags, command === 'plan');
       default:
         io.err(`Unknown command "${command}".`);
         io.err(HELP);

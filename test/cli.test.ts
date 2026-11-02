@@ -154,6 +154,24 @@ describe('referalli CLI', () => {
     expect(JSON.parse(t.out.at(-1)!)).toEqual([{ id: 'prg_1' }]);
   });
 
+  it('trigger --stripe sends a fixture to the sandbox endpoint', async () => {
+    const env = { ...tempEnv(), REFERALLI_API_KEY: 'rk_test_x', REFERALLI_API_URL: 'http://api.test' };
+    const api = fakeApi({
+      'POST /v1/sandbox/stripe-fixtures': () => ({
+        eventId: 'evt_r',
+        received: 1,
+        results: [{ duplicate: false }],
+        commissions: [{ id: 'cev_1', type: 'earned', amountMinor: 980, currency: 'usd' }],
+      }),
+    });
+    const t = io(env, api.fetchFn);
+    expect(await runCli(['trigger', '--stripe', 'invoice.paid', '--connection', 'bcon_1', '--data', '{"customerRef":"cus_1","eventId":"evt_r"}'], t.io)).toBe(0);
+    expect(api.calls.at(-1)!.body).toEqual({ connectionId: 'bcon_1', event: 'invoice.paid', overrides: { customerRef: 'cus_1' }, eventId: 'evt_r' });
+    expect(t.out.slice(-2)).toEqual(['Sent invoice.paid [evt_r]: 1 billing event(s), 1 commission event(s).', '  earned  980 usd  cev_1']);
+    expect(await runCli(['trigger', '--stripe', 'invoice.paid'], t.io)).toBe(1);
+    expect(t.err.at(-1)).toContain('--connection');
+  });
+
   it('api --secret-file writes a once-shown secret to a 0600 file and keeps it off the terminal', async () => {
     const env = { ...tempEnv(), REFERALLI_API_KEY: 'k', REFERALLI_API_URL: 'http://api.test' };
     const api = fakeApi({ 'POST /v1/billing/connections': () => ({ id: 'bcon_1', webhookSecret: 'whsec_shh' }) });

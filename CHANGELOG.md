@@ -7,6 +7,9 @@ bump may include breaking changes; they are called out under **Changed**.
 
 ## 0.3.0 - 2026-11-02
 
+- `trigger --stripe <event> --connection <id> [--data JSON]`: send a Stripe event fixture into a test-mode billing connection (`POST /v1/sandbox/stripe-fixtures`) and print the commissions it created.
+- `plan <file>` and `apply <file> [--plan] [--check] [--secret-file PATH]`: declarative config for programs, commission rules, Stripe credit settings, webhook endpoints and API keys (YAML or JSON). Matched by slug, url and name + owner; creates send an `Idempotency-Key`; `--check` exits 2 on drift (1 is an error); no deletes, rotations or revocations.
+- New runtime dependency: `js-yaml`.
 - `api --secret-file <path>`: write a returned secret (API key, webhook signing secret) to a new 0600 file instead of printing it.
 - API additions from `referalli` 0.3.0: one-call referrers, partner summary, portal links, program-scoped API keys and the Stripe balance credit rail.
 

@@ -58,6 +58,8 @@ referalli keys revoke key_…
 referalli api GET /v1/partners
 referalli api POST /v1/links --data '{"partnerId":"prt_…","programId":"prg_…"}'
 referalli open docs      # also: dashboard, keys, webhooks, spec, status
+referalli plan referalli.yaml --check   # declarative config; see https://referalli.com/docs (CLI page)
+referalli apply referalli.yaml --secret-file new-secrets.json
 ```
 
 ## Environment

@@ -15,7 +15,7 @@ export type FetchFn = typeof fetch;
 
 export interface Client {
   baseUrl: string;
-  request<T = unknown>(method: string, path: string, body?: unknown, opts?: { signal?: AbortSignal }): Promise<T>;
+  request<T = unknown>(method: string, path: string, body?: unknown, opts?: { signal?: AbortSignal; headers?: Record<string, string> }): Promise<T>;
 }
 
 export function createClient(opts: { baseUrl: string; key?: string; fetchFn?: FetchFn }): Client {
@@ -23,8 +23,8 @@ export function createClient(opts: { baseUrl: string; key?: string; fetchFn?: Fe
   const baseUrl = opts.baseUrl.replace(/\/$/, '');
   return {
     baseUrl,
-    async request<T>(method: string, path: string, body?: unknown, ropts: { signal?: AbortSignal } = {}): Promise<T> {
-      const headers: Record<string, string> = { 'user-agent': `referalli-cli/${VERSION}` };
+    async request<T>(method: string, path: string, body?: unknown, ropts: { signal?: AbortSignal; headers?: Record<string, string> } = {}): Promise<T> {
+      const headers: Record<string, string> = { 'user-agent': `referalli-cli/${VERSION}`, ...ropts.headers };
       if (opts.key) headers.authorization = `Bearer ${opts.key}`;
       if (body !== undefined) headers['content-type'] = 'application/json';
       const res = await fetchFn(`${baseUrl}${path}`, {
