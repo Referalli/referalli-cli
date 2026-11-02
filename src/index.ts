@@ -19,7 +19,7 @@ Usage:
   referalli events tail [--events topic,topic] [--since 1h|ISO] [--json] [--max N]
   referalli logs tail [--max N]
   referalli open [docs|dashboard|keys|webhooks|spec|status]
-  referalli api <METHOD> <path> [--data JSON]
+  referalli api <METHOD> <path> [--data JSON] [--secret-file PATH]
   referalli keys create --name NAME [--owner WHO] [--mode both|live|test] [--scopes full,…] [--expires-days N]
   referalli keys list [--owner WHO] [--mode live|test]
   referalli keys revoke <key id> [--pair] [--cascade]
@@ -48,6 +48,7 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         max: { type: 'string' },
         wait: { type: 'string' },
         data: { type: 'string' },
+        'secret-file': { type: 'string' },
         name: { type: 'string' },
         owner: { type: 'string' },
         mode: { type: 'string' },

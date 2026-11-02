@@ -5,6 +5,11 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.3.0 - 2026-11-02
+
+- `api --secret-file <path>`: write a returned secret (API key, webhook signing secret) to a new 0600 file instead of printing it.
+- API additions from `referalli` 0.3.0: one-call referrers, partner summary, portal links, program-scoped API keys and the Stripe balance credit rail.
+
 ## 0.2.0 - 2026-10-24
 
 - API 2026-11-01 additions: 56 new operations (inbound signup connectors, billing product filters, per-org SSO and partner-portal sign-in, support-tool context cards, data-rights executors, account closure, rewards, integration health, plans, the event feed and bulk webhook replay) and 2 webhook topics (`webhook_endpoint.failing`, `webhook_endpoint.recovered`).

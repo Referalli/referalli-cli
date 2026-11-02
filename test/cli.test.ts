@@ -154,6 +154,19 @@ describe('referalli CLI', () => {
     expect(JSON.parse(t.out.at(-1)!)).toEqual([{ id: 'prg_1' }]);
   });
 
+  it('api --secret-file writes a once-shown secret to a 0600 file and keeps it off the terminal', async () => {
+    const env = { ...tempEnv(), REFERALLI_API_KEY: 'k', REFERALLI_API_URL: 'http://api.test' };
+    const api = fakeApi({ 'POST /v1/billing/connections': () => ({ id: 'bcon_1', webhookSecret: 'whsec_shh' }) });
+    const t = io(env, api.fetchFn);
+    const file = join(env.REFERALLI_CONFIG_DIR, 'billing.secret');
+    expect(await runCli(['api', 'POST', '/v1/billing/connections', '--data', '{"provider":"generic"}', '--secret-file', file], t.io)).toBe(0);
+    expect(readFileSync(file, 'utf8')).toBe('whsec_shh\n');
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(t.out.join('\n')).not.toContain('whsec_shh');
+    // Never overwrites an existing file.
+    expect(await runCli(['api', 'POST', '/v1/billing/connections', '--secret-file', file], t.io)).toBe(1);
+  });
+
   it('explains what is wrong instead of throwing', async () => {
     const t = io(tempEnv(), fakeApi({}).fetchFn);
     expect(await runCli(['whoami'], t.io)).toBe(1);

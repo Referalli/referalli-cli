@@ -1,3 +1,4 @@
+import { chmodSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { ApiError, createClient, type Client, type FetchFn } from './client.js';
 import { DEFAULT_BASE_URL, readConfig, removeConfig, writeConfig, type CliConfig } from './config.js';
@@ -425,7 +426,7 @@ export async function keys(io: Io, sub: string | undefined, arg: string | undefi
 // --- api ---------------------------------------------------------------------------
 
 export async function api(io: Io, method: string | undefined, path: string | undefined, flags: Flags): Promise<number> {
-  if (!method || !path) throw new CliError('Usage: referalli api <METHOD> <path> [--data JSON]');
+  if (!method || !path) throw new CliError('Usage: referalli api <METHOD> <path> [--data JSON] [--secret-file PATH]');
   const { client } = signedIn(io);
   let body: unknown;
   if (typeof flags.data === 'string') {
@@ -436,6 +437,18 @@ export async function api(io: Io, method: string | undefined, path: string | und
     }
   }
   const res = await client.request(method.toUpperCase(), path.startsWith('/') ? path : `/${path}`, body);
+  if (typeof flags['secret-file'] === 'string') {
+    // A secret shown once (a billing connection's webhookSecret, a new key): to a 0600 file, never to the terminal.
+    const field = SECRET_FIELDS.find((f) => typeof (res as Record<string, unknown> | null)?.[f] === 'string');
+    if (!field) throw new CliError(`--secret-file: the response has no ${SECRET_FIELDS.join(', ')} field`);
+    const file = flags['secret-file'];
+    writeFileSync(file, `${(res as Record<string, string>)[field]}\n`, { mode: 0o600, flag: 'wx' });
+    chmodSync(file, 0o600);
+    io.out(JSON.stringify({ ...(res as object), [field]: `(written to ${file})` }, null, 2));
+    return 0;
+  }
   io.out(JSON.stringify(res, null, 2));
   return 0;
 }
+
+const SECRET_FIELDS = ['webhookSecret', 'secret', 'key'] as const;
