@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util';
 import { ApiError } from './client.js';
-import { api, apply, CliError, doctor, eventsTail, keys, login, listen, logout, logsTail, open, trigger, whoami, type Flags, type Io } from './commands.js';
+import { api, apply, CliError, doctor, env, eventsTail, keys, login, listen, logout, logsTail, open, trigger, whoami, type Flags, type Io } from './commands.js';
 import { VERSION } from './version.js';
 
 export { readConfig, writeConfig, configPath, type CliConfig } from './config.js';
@@ -28,11 +28,13 @@ Usage:
   referalli plan <referalli.yaml> [--check]
   referalli apply <referalli.yaml> [--plan] [--check] [--secret-file PATH]
   referalli doctor [--program <id>] [--json]
+  referalli env pull [--mode live|test]   (.env lines on stdout; default: the key's mode)
 
 Environment:
   REFERALLI_API_KEY   use this key instead of the saved login
   REFERALLI_API_URL   API base URL (default: the hosted API)
-  REFERALLI_CONFIG_DIR where the login is saved (default ~/.config/referalli)`;
+  REFERALLI_CONFIG_DIR where the login is saved (default ~/.config/referalli)
+  REFERALLI_TRACKING_TOKEN  doctor checks it is this mode's token (or NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN)`;
 
 /** Run one command; returns the process exit code. */
 export async function runCli(argv: string[], io: Io): Promise<number> {
@@ -119,6 +121,8 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         return await apply(io, rest[0], flags, command === 'plan');
       case 'doctor':
         return await doctor(io, flags);
+      case 'env':
+        return await env(io, rest[0], flags);
       default:
         io.err(`Unknown command "${command}".`);
         io.err(HELP);

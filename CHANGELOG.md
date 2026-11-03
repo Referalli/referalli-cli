@@ -5,6 +5,11 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.1 - 2026-11-03
+
+- New `env pull [--mode live|test]`: prints one mode's tracking token (`REFERALLI_TRACKING_TOKEN`, `NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN`), aff.js URL, link base and, for the key's own mode, the program id as `.env` lines. Keys are never pulled.
+- `doctor` checks the Atlas adapter: each auth connection's last sign-up (`lastSignupAt`; warns when none or none in 30 days), `auth.atlas` (warns when no auth connection reports sign-ups), and `tracking.configured` (your `REFERALLI_TRACKING_TOKEN` is the token for the key's mode).
+
 ## 0.4.0 - 2026-11-03
 
 - `apply` manages `billingConnections`: matched by `name`, with `provider`, `programs` (slugs), `status`, `customerRefMetadataKey`, `filter`, and `stripeKeyEnv` (Stripe one-call connect, create only). Missing connections are created, changed fields PATCHed, none deleted; the new `webhookSecret` goes to `--secret-file` (or is printed once, like other new secrets). `--check` exits 2 on billing connection drift too.

@@ -289,4 +289,44 @@ describe('referalli CLI', () => {
     expect(t.out[0]).toBe(pkg.version);
     expect(Object.keys(pkg.bin)).toEqual(['referalli']);
   });
+
+  describe('env pull', () => {
+    const tokens = {
+      mode: 'test',
+      live: { orgId: 'org_l', trackingToken: 'tk_live', scriptUrl: 'https://r.test/t/tk_live/aff.js', linkBaseUrl: 'https://go.ff.test', linkTemplate: '' },
+      test: { orgId: 'org_t', trackingToken: 'tk_test', scriptUrl: 'https://r.test/t/tk_test/aff.js', linkBaseUrl: 'https://r.test', linkTemplate: '' },
+    };
+    const api = () =>
+      fakeApi({
+        'GET /v1/org/tracking-tokens': () => tokens,
+        'GET /v1/programs': () => ({ object: 'list', data: [{ id: 'prg_t', name: 'P', status: 'active' }, { id: 'prg_old', name: 'O', status: 'archived' }], has_more: false }),
+      });
+    const envFor = () => ({ ...tempEnv(), REFERALLI_API_KEY: 'rk_test_1', REFERALLI_API_URL: 'http://api.test' });
+
+    it("defaults to the key's mode and includes its single active program", async () => {
+      const t = io(envFor(), api().fetchFn);
+      expect(await runCli(['env', 'pull'], t.io)).toBe(0);
+      expect(t.out).toContain('REFERALLI_TRACKING_TOKEN=tk_test');
+      expect(t.out).toContain('NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN=tk_test');
+      expect(t.out).toContain('REFERALLI_SCRIPT_URL=https://r.test/t/tk_test/aff.js');
+      expect(t.out).toContain('REFERALLI_PROGRAM_ID=prg_t');
+      expect(t.out.join('\n')).not.toMatch(/rk_test_1/);
+    });
+
+    it("--mode live from a test key: live tokens, program ids left to a live key", async () => {
+      const a = api();
+      const t = io(envFor(), a.fetchFn);
+      expect(await runCli(['env', 'pull', '--mode', 'live'], t.io)).toBe(0);
+      expect(t.out).toContain('REFERALLI_TRACKING_TOKEN=tk_live');
+      expect(t.out).toContain('REFERALLI_LINK_BASE_URL=https://go.ff.test');
+      expect(t.out.some((l) => l.startsWith('REFERALLI_PROGRAM_ID='))).toBe(false);
+      expect(a.calls.some((c) => c.url.includes('/v1/programs'))).toBe(false);
+    });
+
+    it('refuses an unknown mode', async () => {
+      const t = io(envFor(), api().fetchFn);
+      expect(await runCli(['env', 'pull', '--mode', 'staging'], t.io)).toBe(1);
+      expect(t.err.join('\n')).toContain('--mode is live or test');
+    });
+  });
 });

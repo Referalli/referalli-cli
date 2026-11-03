@@ -515,3 +515,37 @@ export async function apply(io: Io, file: string | undefined, flags: Flags, plan
 
 /** `referalli doctor [--program <id>] [--json]`. */
 export const doctor = (io: Io, flags: Flags): Promise<number> => runDoctor(io, signedIn(io).client, flags);
+
+// --- env -------------------------------------------------------------------------
+
+interface ModeValues { orgId: string; trackingToken: string; scriptUrl: string; linkBaseUrl: string }
+
+/**
+ * `referalli env pull [--mode live|test]`: one mode's public ids as .env lines
+ * on stdout (`> .env.test`). Default: the key's mode. Program ids differ per
+ * mode and are listed only for the key's own; secrets are never pulled.
+ */
+export async function env(io: Io, sub: string | undefined, flags: Flags): Promise<number> {
+  if (sub !== 'pull') throw new CliError('Usage: referalli env pull [--mode live|test]');
+  const { client } = signedIn(io);
+  const t = await client.request<{ mode: 'live' | 'test'; live: ModeValues; test: ModeValues }>('GET', '/v1/org/tracking-tokens');
+  const mode = typeof flags.mode === 'string' ? flags.mode : t.mode;
+  if (mode !== 'live' && mode !== 'test') throw new CliError('--mode is live or test');
+  const v = t[mode];
+  io.out(`# Referalli ${mode} mode, org ${v.orgId}`);
+  io.out(`REFERALLI_TRACKING_TOKEN=${v.trackingToken}`);
+  io.out(`NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN=${v.trackingToken}`);
+  io.out(`REFERALLI_SCRIPT_URL=${v.scriptUrl}`);
+  io.out(`REFERALLI_LINK_BASE_URL=${v.linkBaseUrl}`);
+  if (mode !== t.mode) {
+    io.out(`# REFERALLI_PROGRAM_ID: ${mode} programs have their own ids; run env pull with a ${mode} key to list them`);
+  } else {
+    const res = await client.request<Array<{ id: string; name: string; status: string }> | { data: Array<{ id: string; name: string; status: string }> }>('GET', '/v1/programs');
+    const programs = (Array.isArray(res) ? res : res.data).filter((p) => p.status === 'active');
+    if (programs.length === 1) io.out(`REFERALLI_PROGRAM_ID=${programs[0]!.id}`);
+    else if (programs.length === 0) io.out(`# REFERALLI_PROGRAM_ID: no active ${mode} programs yet`);
+    else for (const p of programs) io.out(`# REFERALLI_PROGRAM_ID=${p.id}  # ${p.name}`);
+  }
+  io.out(`# REFERALLI_API_KEY=rk_${mode}_…  (secret, not pulled: referalli keys create --name NAME --mode ${mode})`);
+  return 0;
+}

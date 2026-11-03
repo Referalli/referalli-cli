@@ -112,32 +112,71 @@ async function billingChecks(client: Client): Promise<Check[]> {
   });
 }
 
-interface AuthConnection { id: string; provider: string; name: string | null; status: string; tokenVerification: unknown; allowedOrigins: string[] }
+interface AuthConnection { id: string; provider: string; name: string | null; status: string; tokenVerification: unknown; allowedOrigins: string[]; lastSignupAt?: string | null }
 
-async function authChecks(client: Client): Promise<Check[]> {
+async function authChecks(client: Client, now: Date): Promise<Check[]> {
   const conns = rows(await client.request<AuthConnection[] | { data: AuthConnection[] }>('GET', '/v1/auth/connections'));
-  if (conns.length === 0) return [{ id: 'auth', status: 'ok', message: 'no auth connections' }];
-  // Protocol connections (Atlas, custom) can't be pinged with an API key: status and settings only.
-  return conns.map((c): Check => {
+  const out = conns.map((c): Check => {
     const id = `auth.${c.id}`;
     const label = `${c.provider} auth connection${c.name ? ` "${c.name}"` : ''}`;
     if (c.status === 'paused') return { id, status: 'warn', message: `${label} is paused`, fix: `PATCH /v1/auth/connections/${c.id} {"status":"active"}` };
     if (c.tokenVerification && c.allowedOrigins.length === 0) {
       return { id, status: 'warn', message: `${label} verifies tokens but has no allowedOrigins: the widget session refuses browsers`, fix: `PATCH /v1/auth/connections/${c.id} {"allowedOrigins":["https://your.app"]}` };
     }
-    return { id, status: 'ok', message: `${label} is ${c.status}` };
+    // Protocol connections (Atlas, custom) can't be pinged with an API key: when it last filed a sign-up says it's wired.
+    // undefined: an API from before lastSignupAt, nothing to say.
+    if (c.lastSignupAt === null) {
+      return { id, status: 'warn', message: `${label} is ${c.status} but has never filed a sign-up`, fix: `sign up a user in your app (test sign-ups don't count) and check the platform calls connection ${c.id}` };
+    }
+    if (c.lastSignupAt && now.getTime() - new Date(c.lastSignupAt).getTime() > 30 * DAY) {
+      return { id, status: 'warn', message: `${label} is ${c.status}; no sign-up since ${c.lastSignupAt}`, fix: `check the platform still calls connection ${c.id}` };
+    }
+    return { id, status: 'ok', message: `${label} is ${c.status}${c.lastSignupAt ? `; last sign-up ${c.lastSignupAt}` : ''}` };
   });
+  if (!conns.some((c) => c.provider === 'atlas')) {
+    const other = conns.find((c) => c.status === 'active');
+    out.push(
+      other
+        ? { id: 'auth.atlas', status: 'ok', message: `no Atlas connection; sign-ups come through ${other.provider}` }
+        : { id: 'auth.atlas', status: 'warn', message: 'no Atlas connection (and no other active auth connection): sign-ups are attributed only if your app calls associate', fix: 'POST /v1/auth/connections {"provider":"atlas","programId":"prg_…","instanceId":"…"}' },
+    );
+  }
+  return out;
 }
 
-async function trackingCheck(client: Client): Promise<Check[]> {
-  const org = await client.request<{ trackingToken: string }>('GET', '/v1/org');
+type Mode = 'live' | 'test';
+interface TrackingTokens { mode: Mode; live: { trackingToken: string }; test: { trackingToken: string } }
+
+async function trackingCheck(client: Client, env: NodeJS.ProcessEnv): Promise<Check[]> {
+  const org = await client.request<{ trackingToken: string; livemode?: boolean }>('GET', '/v1/org');
+  const out: Check[] = [];
   try {
     const cfg = await client.request<{ cookieWindowDays: number }>('GET', `/t/${encodeURIComponent(org.trackingToken)}/config.json`);
-    return [{ id: 'tracking', status: 'ok', message: `tracking token ${org.trackingToken} answers; cookie window ${cfg.cookieWindowDays} days` }];
+    out.push({ id: 'tracking', status: 'ok', message: `tracking token ${org.trackingToken} answers; cookie window ${cfg.cookieWindowDays} days` });
   } catch (err) {
     if (!(err instanceof ApiError && err.status === 404)) throw err;
-    return [{ id: 'tracking', status: 'fail', message: `tracking token ${org.trackingToken} is unknown to /t/…/config.json`, fix: '/settings' }];
+    out.push({ id: 'tracking', status: 'fail', message: `tracking token ${org.trackingToken} is unknown to /t/…/config.json`, fix: '/settings' });
   }
+  // The token the product is configured with (run doctor with the app's env) must be this mode's.
+  const name = env.REFERALLI_TRACKING_TOKEN ? 'REFERALLI_TRACKING_TOKEN' : env.NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN ? 'NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN' : null;
+  if (!name) return out;
+  const configured = env[name]!.trim();
+  const mode: Mode = org.livemode === false ? 'test' : 'live';
+  const id = 'tracking.configured';
+  const fix = `referalli env pull --mode ${mode}`;
+  if (configured === org.trackingToken) {
+    out.push({ id, status: 'ok', message: `${name} is the org's ${mode} token` });
+    return out;
+  }
+  const other: Mode = mode === 'live' ? 'test' : 'live';
+  const tokens = await guard(id, fix, async () => {
+    const t = await client.request<TrackingTokens>('GET', '/v1/org/tracking-tokens');
+    if (t[other].trackingToken === configured) {
+      return [{ id, status: 'warn', message: `${name} is the org's ${other} token but this key is ${mode}: run doctor with a ${other} key, or switch the app to the ${mode} token`, fix }];
+    }
+    return [{ id, status: 'fail', message: `${name}=${configured} is neither the org's live nor its test token: aff.js and links won't attribute to this org`, fix }];
+  });
+  return [...out, ...tokens];
 }
 
 const MARK = { ok: '✓', warn: '⚠', fail: '✗' } as const;
@@ -151,8 +190,8 @@ export async function runDoctor(io: Io, client: Client, flags: Flags, now = new 
       guard('programs', undefined, () => termsChecks(client, program)),
       guard('webhooks', undefined, () => webhookChecks(client)),
       guard('billing', undefined, () => billingChecks(client)),
-      guard('auth', undefined, () => authChecks(client)),
-      guard('tracking', undefined, () => trackingCheck(client)),
+      guard('auth', undefined, () => authChecks(client, now)),
+      guard('tracking', undefined, () => trackingCheck(client, io.env)),
     ])
   ).flat();
   if (flags.json) io.out(JSON.stringify({ checks }, null, 2));

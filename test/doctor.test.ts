@@ -18,7 +18,7 @@ function healthy(over: Routes = {}): Routes {
   };
 }
 
-function run(routes: Routes, args: string[] = []) {
+function run(routes: Routes, args: string[] = [], extraEnv: Record<string, string> = {}) {
   const fetchFn = (async (url: string, init: RequestInit) => {
     const r = routes[`${init.method} ${new URL(url).pathname}`];
     if (r instanceof Response) return r;
@@ -29,7 +29,7 @@ function run(routes: Routes, args: string[] = []) {
   const io: Io = {
     out: (l) => out.push(l),
     err: (l) => out.push(l),
-    env: { REFERALLI_API_KEY: 'rk_test_1', REFERALLI_API_URL: 'http://api.test' },
+    env: { REFERALLI_API_KEY: 'rk_test_1', REFERALLI_API_URL: 'http://api.test', ...extraEnv },
     fetchFn,
     sleep: async () => {},
     openBrowser: () => false,
@@ -87,5 +87,49 @@ describe('referalli doctor', () => {
     expect(code).toBe(0);
     expect(out).toContain("⚠ billing: couldn't check: 403 forbidden: needs billing:read");
     expect(out).toContain('✓ tracking');
+  });
+
+  describe('Atlas adapter and the configured tracking token', () => {
+    const atlas = (lastSignupAt: string | null) => ({
+      'GET /v1/auth/connections': [{ id: 'acon_a', provider: 'atlas', name: 'Atlas', status: 'active', tokenVerification: null, allowedOrigins: [], lastSignupAt }],
+    });
+    const tokens = { 'GET /v1/org/tracking-tokens': { mode: 'live', live: { trackingToken: 'tok_1' }, test: { trackingToken: 'tok_t' } } };
+
+    it('an active Atlas connection shows its last sign-up', async () => {
+      const recent = new Date(Date.now() - 3_600_000).toISOString();
+      const { code, out } = await run(healthy(atlas(recent)));
+      expect(code).toBe(0);
+      expect(out).toContain(`✓ auth.acon_a: atlas auth connection "Atlas" is active; last sign-up ${recent}`);
+      expect(out).not.toContain('auth.atlas');
+    });
+
+    it('never filed a sign-up, or none in 30 days: a warning', async () => {
+      expect((await run(healthy(atlas(null)))).out).toContain('⚠ auth.acon_a: atlas auth connection "Atlas" is active but has never filed a sign-up');
+      const { code, out } = await run(healthy(atlas('2020-01-01T00:00:00.000Z')));
+      expect(code).toBe(0);
+      expect(out).toContain('⚠ auth.acon_a: atlas auth connection "Atlas" is active; no sign-up since 2020-01-01');
+    });
+
+    it('no Atlas connection warns only when nothing else files sign-ups; never fails', async () => {
+      expect((await run(healthy())).out).toContain('✓ auth.atlas: no Atlas connection; sign-ups come through clerk');
+      const { code, out } = await run(healthy({ 'GET /v1/auth/connections': [] }));
+      expect(code).toBe(0);
+      expect(out).toContain('⚠ auth.atlas: no Atlas connection');
+    });
+
+    it("REFERALLI_TRACKING_TOKEN: this mode's token ok, the other mode's warns, anything else fails", async () => {
+      expect((await run(healthy(tokens), [], { REFERALLI_TRACKING_TOKEN: 'tok_1' })).out).toContain("✓ tracking.configured: REFERALLI_TRACKING_TOKEN is the org's live token");
+      const other = await run(healthy(tokens), [], { NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN: 'tok_t' });
+      expect(other.code).toBe(0);
+      expect(other.out).toContain("⚠ tracking.configured: NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN is the org's test token but this key is live");
+      const wrong = await run(healthy(tokens), [], { REFERALLI_TRACKING_TOKEN: 'tok_nope' });
+      expect(wrong.code).toBe(1);
+      expect(wrong.out).toContain('✗ tracking.configured: REFERALLI_TRACKING_TOKEN=tok_nope is neither');
+      expect(wrong.out).toContain('fix: referalli env pull --mode live');
+    });
+
+    it('no configured token: no tracking.configured line', async () => {
+      expect((await run(healthy())).out).not.toContain('tracking.configured');
+    });
   });
 });
