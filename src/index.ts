@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util';
 import { ApiError } from './client.js';
-import { api, apply, CliError, eventsTail, keys, login, listen, logout, logsTail, open, trigger, whoami, type Flags, type Io } from './commands.js';
+import { api, apply, CliError, doctor, eventsTail, keys, login, listen, logout, logsTail, open, trigger, whoami, type Flags, type Io } from './commands.js';
 import { VERSION } from './version.js';
 
 export { readConfig, writeConfig, configPath, type CliConfig } from './config.js';
@@ -27,6 +27,7 @@ Usage:
   referalli keys revoke <key id> [--pair] [--cascade]
   referalli plan <referalli.yaml> [--check]
   referalli apply <referalli.yaml> [--plan] [--check] [--secret-file PATH]
+  referalli doctor [--program <id>] [--json]
 
 Environment:
   REFERALLI_API_KEY   use this key instead of the saved login
@@ -55,6 +56,7 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         stripe: { type: 'string' },
         billing: { type: 'string' },
         connection: { type: 'string' },
+        program: { type: 'string' },
         'secret-file': { type: 'string' },
         name: { type: 'string' },
         owner: { type: 'string' },
@@ -115,6 +117,8 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
       case 'plan':
       case 'apply':
         return await apply(io, rest[0], flags, command === 'plan');
+      case 'doctor':
+        return await doctor(io, flags);
       default:
         io.err(`Unknown command "${command}".`);
         io.err(HELP);

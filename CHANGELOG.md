@@ -5,6 +5,11 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.0 - 2026-11-03
+
+- `apply` manages `billingConnections`: matched by `name`, with `provider`, `programs` (slugs), `status`, `customerRefMetadataKey`, `filter`, and `stripeKeyEnv` (Stripe one-call connect, create only). Missing connections are created, changed fields PATCHed, none deleted; the new `webhookSecret` goes to `--secret-file` (or is printed once, like other new secrets). `--check` exits 2 on billing connection drift too.
+- `doctor [--program <id>] [--json]`: read-only setup checks (API key, commission rules, webhook endpoints, billing and auth connections, tracking token), each `✓`/`⚠`/`✗` with a fix. Exits 1 on any `✗`.
+
 ## 0.3.3 - 2026-11-02
 
 - `trigger --billing <event> --connection <id> [--data JSON]`: send a billing event fixture for any provider (the connection's) into a test-mode billing connection (`POST /v1/sandbox/billing-fixtures`). Events are provider-neutral (`payment.paid`, `payment.refunded`, `payment.disputed`, `subscription.created`, `subscription.canceled`) or the provider's own names. `trigger --stripe` keeps working.

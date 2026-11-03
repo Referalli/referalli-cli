@@ -6,7 +6,7 @@ import type { Client } from './client.js';
 /**
  * `referalli plan|apply <file>`: make the account match a declarative file.
  * Every resource is matched by a stable key (program slug, webhook url, API key
- * name + owner); creates carry an Idempotency-Key derived from that key and the
+ * name + owner, billing connection name); creates carry an Idempotency-Key derived from that key and the
  * request, so a retried apply never creates twice. Nothing missing from the file
  * is ever deleted, rotated or revoked.
  */
@@ -31,10 +31,18 @@ interface ApiKeySpec extends Obj {
   owner?: string;
   programs?: string[];
 }
+interface BillingConnectionSpec extends Obj {
+  name: string;
+  provider: string;
+  programs?: string[];
+  status?: 'active' | 'paused';
+  stripeKeyEnv?: string;
+}
 export interface ApplyConfig {
   programs: ProgramSpec[];
   webhooks: WebhookSpec[];
   apiKeys: ApiKeySpec[];
+  billingConnections: BillingConnectionSpec[];
 }
 
 // Program fields compared against GET /v1/programs/{id} and sent as-is on PATCH.
@@ -45,6 +53,8 @@ const PROGRAM_KEYS = ['slug', ...PROGRAM_TOP, ...PROGRAM_SETTINGS, 'destinationU
 const STRIPE_KEYS = ['enabled', 'referrerMatch', 'metadataKey', 'refereeRewards', 'balanceCurrency', 'createCustomerIfMissing', 'waitForCustomer', 'secretKeyEnv'];
 const WEBHOOK_KEYS = ['url', 'topics', 'programs', 'status', 'alertContacts'];
 const API_KEY_KEYS = ['name', 'owner', 'mode', 'scopes', 'expiresInDays', 'programs', 'apiVersion'];
+const BILLING_KEYS = ['name', 'provider', 'programs', 'status', 'customerRefMetadataKey', 'filter', 'stripeKeyEnv'];
+const SECRET_KEYS = ['secretKey', 'stripeKey', 'webhookSecret', 'credentials'];
 // What the API stores when a rule leaves these out (packages/commissions ruleConfigSchema).
 const RULE_DEFAULTS = { appliesTo: 'gross', recurring: { type: 'lifetime' }, holdDays: 30, rounding: 'half_even', overrides: [] };
 
@@ -53,7 +63,7 @@ const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !
 function checkKeys(o: unknown, allowed: readonly string[], where: string, required?: string): asserts o is Obj {
   if (!isObj(o)) throw new ConfigError(`${where}: expected a mapping`);
   for (const k of Object.keys(o)) {
-    if (k === 'secretKey') throw new ConfigError(`${where}: secrets never go in the file; use secretKeyEnv: ENV_VAR_NAME`);
+    if (SECRET_KEYS.includes(k)) throw new ConfigError(`${where}: secrets never go in the file; use secretKeyEnv / stripeKeyEnv: ENV_VAR_NAME`);
     if (!allowed.includes(k)) throw new ConfigError(`${where}: unknown field "${k}" (allowed: ${allowed.join(', ')})`);
   }
   if (required && (typeof o[required] !== 'string' || !o[required])) throw new ConfigError(`${where}: "${required}" is required`);
@@ -73,7 +83,7 @@ export function parseConfig(text: string, file = 'config'): ApplyConfig {
   } catch (err) {
     throw new ConfigError(`${file}: ${(err as Error).message}`);
   }
-  checkKeys(doc ?? {}, ['programs', 'webhooks', 'apiKeys'], file);
+  checkKeys(doc ?? {}, ['programs', 'webhooks', 'apiKeys', 'billingConnections'], file);
   const d = (doc ?? {}) as Obj;
   const programs = list(d.programs, 'programs').map((p, i) => {
     const where = `programs[${i}]`;
@@ -97,7 +107,18 @@ export function parseConfig(text: string, file = 'config'): ApplyConfig {
     checkKeys(k, API_KEY_KEYS, `apiKeys[${i}]`, 'name');
     return k as ApiKeySpec;
   });
-  return { programs, webhooks, apiKeys };
+  const billingConnections = list(d.billingConnections, 'billingConnections').map((b, i) => {
+    const where = `billingConnections[${i}]`;
+    checkKeys(b, BILLING_KEYS, where, 'name');
+    if (typeof b.provider !== 'string' || !b.provider) throw new ConfigError(`${where}: "provider" is required`);
+    if (b.status !== undefined && b.status !== 'active' && b.status !== 'paused') throw new ConfigError(`${where}.status: active or paused`);
+    if (b.stripeKeyEnv !== undefined && b.provider !== 'stripe') throw new ConfigError(`${where}: stripeKeyEnv is for provider "stripe"`);
+    return b as BillingConnectionSpec;
+  });
+  const names = billingConnections.map((b) => b.name);
+  const dupName = names.find((s, i) => names.indexOf(s) !== i);
+  if (dupName) throw new ConfigError(`billingConnections: name "${dupName}" is listed twice`);
+  return { programs, webhooks, apiKeys, billingConnections };
 }
 
 // --- planning -------------------------------------------------------------------
@@ -346,6 +367,67 @@ export async function buildPlan(client: Client, config: ApplyConfig, env: NodeJS
         return issued.map((k) => [`apiKey ${spec.name}${owner ? ` (${owner})` : ''} ${k.livemode ? 'live' : 'test'}`, k.key]);
       },
     });
+  }
+  if (config.billingConnections.length) {
+    const conns = await client.request<
+      Array<{ id: string; name: string; provider: string; status: string; programIds: string[] | null; customerRefMetadataKey: string | null; filter: unknown }>
+    >('GET', '/v1/billing/connections');
+    for (const spec of config.billingConnections) {
+      const label = `billingConnection "${spec.name}"`;
+      checkRefs(spec.programs, label);
+      const matches = conns.filter((c) => c.name === spec.name);
+      if (matches.length > 1) throw new ConfigError(`${label}: ${matches.length} connections on the account have this name; rename all but one (PATCH /v1/billing/connections/{id})`);
+      const cur = matches[0];
+      // programs and status are always managed (like webhooks); the optional fields only when the file sets them (null clears).
+      const want: Obj = { programs: sorted(spec.programs), status: spec.status ?? 'active' };
+      for (const k of ['customerRefMetadataKey', 'filter']) if (spec[k] !== undefined) want[k] = spec[k];
+      const apiBody = (ctx: RunCtx, keys: string[]) =>
+        Object.fromEntries(keys.map((k) => (k === 'programs' ? ['programIds', programIdsFor(ctx, spec.programs)] : [k, want[k]])));
+      if (!cur) {
+        const key = spec.stripeKeyEnv;
+        if (key && !env[key]) throw new ConfigError(`${label}: environment variable ${key} is not set`);
+        const { status, ...createFields } = want;
+        changes.push({
+          action: 'create',
+          kind: 'billingConnection',
+          label,
+          fields: [
+            ['provider', undefined, spec.provider],
+            ...Object.entries(want).map(([k, v]): Field => [k, undefined, v]),
+            ...(key ? [['stripeKey', undefined, `(from $${key})`] as Field] : []),
+          ],
+          run: async (ctx) => {
+            const body = { name: spec.name, provider: spec.provider, ...apiBody(ctx, Object.keys(createFields).filter((k) => createFields[k] !== null)), ...(key ? { stripeKey: env[key] } : {}) };
+            const made = await create(ctx.client, '/v1/billing/connections', 'billing', spec.name, body);
+            // POST takes no status: pause right after creating.
+            if (status === 'paused') await ctx.client.request('PATCH', `/v1/billing/connections/${made.id as string}`, { status });
+            // awaiting_secret: the generated secret can't verify this provider; the provider's own is set later with PUT …/secret.
+            return typeof made.webhookSecret === 'string' && made.status !== 'awaiting_secret' ? [[label, made.webhookSecret]] : [];
+          },
+        });
+        continue;
+      }
+      if (cur.provider !== spec.provider) {
+        throw new ConfigError(`${label}: the account's connection is provider "${cur.provider}", the file says "${spec.provider}"; a provider can't be changed`);
+      }
+      const now: Obj = {
+        programs: sorted((cur.programIds ?? []).map((id) => slugOf.get(id) ?? id)),
+        status: cur.status === 'awaiting_secret' ? 'active' : cur.status,
+        customerRefMetadataKey: cur.customerRefMetadataKey,
+        filter: cur.filter,
+      };
+      const fields: Field[] = Object.keys(want).filter((k) => !same(now[k], want[k])).map((k) => [k, now[k], want[k]]);
+      changes.push({
+        action: fields.length ? 'update' : 'noop',
+        kind: 'billingConnection',
+        label,
+        fields,
+        run: async (ctx) => {
+          await ctx.client.request('PATCH', `/v1/billing/connections/${cur.id}`, apiBody(ctx, fields.map(([k]) => k)));
+          return [];
+        },
+      });
+    }
   }
   return { changes, ids };
 }

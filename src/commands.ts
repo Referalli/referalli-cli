@@ -2,6 +2,7 @@ import { chmodSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { ConfigError, runApply } from './apply.js';
 import { ApiError, createClient, type Client, type FetchFn } from './client.js';
+import { runDoctor } from './doctor.js';
 import { DEFAULT_BASE_URL, readConfig, removeConfig, writeConfig, type CliConfig } from './config.js';
 
 /** Everything a command touches, injected so commands are testable. */
@@ -511,3 +512,6 @@ export async function apply(io: Io, file: string | undefined, flags: Flags, plan
     throw err;
   }
 }
+
+/** `referalli doctor [--program <id>] [--json]`. */
+export const doctor = (io: Io, flags: Flags): Promise<number> => runDoctor(io, signedIn(io).client, flags);

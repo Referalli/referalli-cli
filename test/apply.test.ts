@@ -7,7 +7,7 @@ import { runCli, type Io } from '../src/index.js';
 /** An in-memory account behind the /v1 routes `plan`/`apply` use; records every call. */
 function fakeAccount() {
   type Row = Record<string, unknown> & { id: string };
-  const db = { programs: [] as Row[], rules: [] as Row[], credits: new Map<string, Row>(), hooks: [] as Row[], keys: [] as Row[] };
+  const db = { programs: [] as Row[], rules: [] as Row[], credits: new Map<string, Row>(), hooks: [] as Row[], keys: [] as Row[], conns: [] as Row[] };
   const calls: Array<{ method: string; path: string; body: Record<string, unknown> | undefined; headers: Record<string, string> }> = [];
   let n = 0;
   const id = (p: string) => `${p}_${++n}`;
@@ -68,6 +68,13 @@ function fakeAccount() {
       };
       return ok({ pairId: 'kpair_1', live: mk(true), test: mk(false) });
     }
+    if (route === 'GET /v1/billing/connections') return ok(db.conns);
+    if (route === 'POST /v1/billing/connections') {
+      const row: Row = { id: id('bcon'), status: 'active', programIds: null, customerRefMetadataKey: null, filter: null, ...body! };
+      db.conns.push(row);
+      return ok({ ...row, webhookSecret: 'whsec_BILLINGSECRET' });
+    }
+    if ((m = route.match(/^PATCH \/v1\/billing\/connections\/(\w+)$/))) return ok(Object.assign(db.conns.find((c) => c.id === m![1])!, body));
     return new Response(JSON.stringify({ error: { code: 'not_found', message: route } }), { status: 404 });
   }) as typeof fetch;
   return { fetchFn, calls, db };
@@ -259,6 +266,50 @@ describe('referalli plan / apply', () => {
     expect(t2.text()).toContain('already exists');
     expect(fresh.calls.filter((c) => c.method !== 'GET')).toEqual([]);
     expect(acct.calls.length).toBe(before);
+  });
+
+  it('billing connections: created by name with the secret to the secret file, unchanged on re-plan, drift exits 2 and PATCHes', async () => {
+    const BILLING = `
+programs:
+  - slug: pro
+billingConnections:
+  - name: formflow-generic
+    provider: generic
+    programs: [pro]
+    customerRefMetadataKey: tenant_owner
+`;
+    const acct = fakeAccount();
+    const secretFile = join(dir(), 'secrets.json');
+    const t = harness(acct);
+    expect(await runCli(['apply', writeConfig(BILLING), '--secret-file', secretFile], t.io)).toBe(0);
+    expect(t.text()).toContain('+ create billingConnection "formflow-generic"');
+    expect(t.text()).not.toContain('whsec_BILLINGSECRET');
+    expect(JSON.parse(readFileSync(secretFile, 'utf8'))).toEqual({ 'billingConnection "formflow-generic"': 'whsec_BILLINGSECRET' });
+    const post = acct.calls.find((c) => c.method === 'POST' && c.path === '/v1/billing/connections')!;
+    expect(post.body).toEqual({ name: 'formflow-generic', provider: 'generic', programIds: [acct.db.programs[0]!.id], customerRefMetadataKey: 'tenant_owner' });
+    expect(post.headers['idempotency-key']).toMatch(/^referalli-apply-billing-/);
+
+    const again = harness(acct);
+    expect(await runCli(['plan', writeConfig(BILLING), '--check'], again.io)).toBe(0);
+    expect(again.text()).toContain('= unchanged billingConnection "formflow-generic"');
+
+    const drifted = writeConfig(BILLING.replace('tenant_owner', 'owner_id').replace('programs: [pro]\n', 'programs: [pro]\n    status: paused\n'));
+    const check = harness(acct);
+    expect(await runCli(['plan', drifted, '--check'], check.io)).toBe(2);
+    expect(check.text()).toContain('    customerRefMetadataKey: "tenant_owner" → "owner_id"');
+    const writes = acct.calls.length;
+    expect(await runCli(['apply', drifted], harness(acct).io)).toBe(0);
+    const patch = acct.calls.slice(writes).find((c) => c.method === 'PATCH')!;
+    expect(patch.body).toEqual({ status: 'paused', customerRefMetadataKey: 'owner_id' });
+    expect(acct.db.conns).toHaveLength(1);
+
+    // A provider can't change under the same name; secrets stay out of the file.
+    const t2 = harness(acct);
+    expect(await runCli(['plan', writeConfig(BILLING.replace('provider: generic', 'provider: paddle'))], t2.io)).toBe(1);
+    expect(t2.text()).toContain("a provider can't be changed");
+    const t3 = harness(fakeAccount());
+    expect(await runCli(['plan', writeConfig('billingConnections:\n  - { name: s, provider: stripe, stripeKey: sk_x }')], t3.io)).toBe(1);
+    expect(t3.text()).toContain('secrets never go in the file');
   });
 
   it('apply --plan only plans; JSON files work too', async () => {
