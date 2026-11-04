@@ -34,6 +34,8 @@ function fakeAccount() {
       const settings = row.settings as Record<string, unknown>;
       if (destinationUrl) settings.widget = { destinationUrl };
       if (selfReferralPolicy) settings.selfReferralPolicy = selfReferralPolicy;
+      if (row.riskPolicy) settings.riskPolicy = row.riskPolicy; // GET returns it under settings
+      delete row.riskPolicy;
       return ok(row);
     }
     if (route === 'GET /v1/commission-rules') return ok(db.rules.filter((r) => r.programId === u.searchParams.get('programId')).reverse());
@@ -68,7 +70,8 @@ function fakeAccount() {
       };
       return ok({ pairId: 'kpair_1', live: mk(true), test: mk(false) });
     }
-    if (route === 'GET /v1/billing/connections') return ok(db.conns);
+    // The live API answers in the list envelope (2026-11-01); a bare array hid `conns.filter is not a function`.
+    if (route === 'GET /v1/billing/connections') return ok({ data: db.conns, has_more: false });
     if (route === 'POST /v1/billing/connections') {
       const row: Row = { id: id('bcon'), status: 'active', programIds: null, customerRefMetadataKey: null, filter: null, ...body! };
       db.conns.push(row);
@@ -335,5 +338,43 @@ billingConnections:
       expect(t.text()).toContain(message);
       expect(t.text()).not.toContain('rk_test_x');
     }
+  });
+
+  it('publicPage and riskPolicy: diffs only the keys the file names, PATCHes the live block with them applied', async () => {
+    const acct = fakeAccount();
+    acct.db.programs.push({
+      id: 'prg_live',
+      slug: 'ff',
+      name: 'ff',
+      publicPage: { pitch: 'Earn 20%', autoApprove: true },
+      settings: { widget: { destinationUrl: null }, riskPolicy: { holdBotScore: 0.9, holdDisposableEmail: true } },
+    });
+    const file = writeConfig('programs:\n  - slug: ff\n    publicPage: { autoApprove: false }\n    riskPolicy: { holdBotScore: 0.8 }\n');
+    const t = harness(acct, ENV);
+    expect(await runCli(['plan', file], t.io)).toBe(0);
+    expect(t.text()).toContain('~ update program "ff"');
+    expect(t.text()).toContain('Plan: 0 to create, 1 to update, 0 unchanged.');
+
+    expect(await runCli(['apply', file], harness(acct, ENV).io)).toBe(0);
+    const patch = acct.calls.find((c) => c.method === 'PATCH')!;
+    expect(patch.body).toEqual({
+      publicPage: { pitch: 'Earn 20%', autoApprove: false },
+      riskPolicy: { holdBotScore: 0.8, holdDisposableEmail: true },
+    });
+    const again = harness(acct, ENV);
+    expect(await runCli(['plan', file], again.io)).toBe(0);
+    expect(again.text()).toContain('Plan: 0 to create, 0 to update, 1 unchanged.');
+
+    const bad = harness(acct, ENV);
+    expect(await runCli(['plan', writeConfig('programs:\n  - slug: ff\n    publicPage: { autoapprove: false }\n')], bad.io)).not.toBe(0);
+    expect(bad.text()).toContain('autoapprove');
+  });
+
+  it('plans billing connections from the list envelope (FormFlow: conns.filter is not a function)', async () => {
+    const acct = fakeAccount();
+    acct.db.conns.push({ id: 'bcon_1', name: 'formflow-generic', provider: 'generic', status: 'active', programIds: null, customerRefMetadataKey: null, filter: null });
+    const t = harness(acct, ENV);
+    expect(await runCli(['plan', writeConfig('billingConnections:\n  - name: formflow-generic\n    provider: generic\n')], t.io)).toBe(0);
+    expect(t.text()).toContain('Plan: 0 to create, 0 to update, 1 unchanged.');
   });
 });

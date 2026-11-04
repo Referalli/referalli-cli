@@ -49,7 +49,9 @@ export interface ApplyConfig {
 const PROGRAM_TOP = ['name', 'attributionModel', 'cookieWindowDays', 'signupToConversionDays', 'termsMd', 'status', 'publicHandle'] as const;
 // Program settings: PATCH takes them top-level, GET returns them under `settings`.
 const PROGRAM_SETTINGS = ['probabilisticPolicy', 'selfReferralPolicy', 'splitCommissions', 'allowPaidSearch', 'challengeLinks', 'settlement'] as const;
-const PROGRAM_KEYS = ['slug', ...PROGRAM_TOP, ...PROGRAM_SETTINGS, 'destinationUrl', 'commissionRule', 'stripeCredits'];
+// Mappings merged into what's live: only the keys the file names are compared, and PATCH sends the live block with them applied.
+const PROGRAM_BLOCKS = { publicPage: ['pitch', 'autoApprove'], riskPolicy: ['holdBotScore', 'holdRiskScore', 'holdHighRiskLevel', 'holdDisposableEmail', 'holdVelocity', 'holdUnverifiedEmail', 'holdSelfReferral'] } as const;
+const PROGRAM_KEYS = ['slug', ...PROGRAM_TOP, ...PROGRAM_SETTINGS, ...Object.keys(PROGRAM_BLOCKS), 'destinationUrl', 'commissionRule', 'stripeCredits'];
 const STRIPE_KEYS = ['enabled', 'referrerMatch', 'metadataKey', 'refereeRewards', 'balanceCurrency', 'createCustomerIfMissing', 'waitForCustomer', 'secretKeyEnv'];
 const WEBHOOK_KEYS = ['url', 'topics', 'programs', 'status', 'alertContacts'];
 const API_KEY_KEYS = ['name', 'owner', 'mode', 'scopes', 'expiresInDays', 'programs', 'apiVersion'];
@@ -89,6 +91,11 @@ export function parseConfig(text: string, file = 'config'): ApplyConfig {
     const where = `programs[${i}]`;
     checkKeys(p, PROGRAM_KEYS, where, 'slug');
     if (p.commissionRule !== undefined && !isObj(p.commissionRule)) throw new ConfigError(`${where}.commissionRule: expected a mapping`);
+    for (const [block, keys] of Object.entries(PROGRAM_BLOCKS)) {
+      if (p[block] === undefined) continue;
+      if (!isObj(p[block])) throw new ConfigError(`${where}.${block}: expected a mapping`);
+      checkKeys(p[block], [...keys], `${where}.${block}`);
+    }
     if (p.stripeCredits !== undefined) {
       checkKeys(p.stripeCredits, STRIPE_KEYS, `${where}.stripeCredits`);
       if (typeof p.stripeCredits.enabled !== 'boolean') throw new ConfigError(`${where}.stripeCredits: "enabled" (true/false) is required`);
@@ -197,7 +204,7 @@ export async function buildPlan(client: Client, config: ApplyConfig, env: NodeJS
     const cur = programs.find((p) => p.slug === spec.slug);
     const label = `program "${spec.slug}"`;
     const desired: Obj = {};
-    for (const k of [...PROGRAM_TOP, ...PROGRAM_SETTINGS, 'destinationUrl']) if (spec[k] !== undefined) desired[k] = spec[k];
+    for (const k of [...PROGRAM_TOP, ...PROGRAM_SETTINGS, ...Object.keys(PROGRAM_BLOCKS), 'destinationUrl']) if (spec[k] !== undefined) desired[k] = spec[k];
     if (!cur) {
       const { destinationUrl, ...rest } = desired;
       // POST takes the destination as the widget setting; PATCH moves it (and its links).
@@ -217,12 +224,14 @@ export async function buildPlan(client: Client, config: ApplyConfig, env: NodeJS
       const now = (k: string) =>
         k === 'destinationUrl'
           ? (cur.settings.widget?.destinationUrl ?? null)
-          : (PROGRAM_SETTINGS as readonly string[]).includes(k)
+          : (PROGRAM_SETTINGS as readonly string[]).includes(k) || k === 'riskPolicy'
             ? cur.settings[k]
             : cur[k];
+      // A block counts as changed only on the keys the file names; the new value is the live block with them applied.
+      const want = (k: string, v: unknown) => (k in PROGRAM_BLOCKS ? { ...((now(k) as Obj | null) ?? {}), ...(v as Obj) } : v);
       const fields: Field[] = Object.entries(desired)
-        .filter(([k, v]) => !same(now(k), v))
-        .map(([k, v]) => [k, now(k), v]);
+        .filter(([k, v]) => !same(now(k), want(k, v)))
+        .map(([k, v]) => [k, now(k), want(k, v)]);
       const patch = Object.fromEntries(fields.map(([k, , v]) => [k, v]));
       changes.push({
         action: fields.length ? 'update' : 'noop',
@@ -369,9 +378,10 @@ export async function buildPlan(client: Client, config: ApplyConfig, env: NodeJS
     });
   }
   if (config.billingConnections.length) {
-    const conns = await client.request<
-      Array<{ id: string; name: string; provider: string; status: string; programIds: string[] | null; customerRefMetadataKey: string | null; filter: unknown }>
-    >('GET', '/v1/billing/connections');
+    const conns = await listAll<{ id: string; name: string; provider: string; status: string; programIds: string[] | null; customerRefMetadataKey: string | null; filter: unknown }>(
+      client,
+      '/v1/billing/connections',
+    );
     for (const spec of config.billingConnections) {
       const label = `billingConnection "${spec.name}"`;
       checkRefs(spec.programs, label);

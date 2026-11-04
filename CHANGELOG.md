@@ -5,6 +5,11 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.2 - 2026-11-03
+
+- Fixed: `plan`/`apply` with a `billingConnections:` list failed with `conns.filter is not a function` (the connections list now arrives in the list envelope).
+- Programs take `publicPage` (`pitch`, `autoApprove`) and `riskPolicy` (`holdBotScore`, `holdRiskScore`, `holdHighRiskLevel`, `holdDisposableEmail`, `holdVelocity`, `holdUnverifiedEmail`, `holdSelfReferral`). Only the keys you list are compared; `apply` merges them into the live settings.
+
 ## 0.4.1 - 2026-11-03
 
 - New `env pull [--mode live|test]`: prints one mode's tracking token (`REFERALLI_TRACKING_TOKEN`, `NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN`), aff.js URL, link base and, for the key's own mode, the program id as `.env` lines. Keys are never pulled.
