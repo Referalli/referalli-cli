@@ -112,7 +112,7 @@ async function billingChecks(client: Client): Promise<Check[]> {
   });
 }
 
-interface AuthConnection { id: string; provider: string; name: string | null; status: string; tokenVerification: unknown; allowedOrigins: string[]; lastSignupAt?: string | null }
+interface AuthConnection { id: string; provider: string; name: string | null; status: string; tokenVerification: unknown; allowedOrigins: string[]; lastSignupAt?: string | null; lastError?: { at: string; code: string; message: string } | null }
 
 async function authChecks(client: Client, now: Date): Promise<Check[]> {
   const conns = rows(await client.request<AuthConnection[] | { data: AuthConnection[] }>('GET', '/v1/auth/connections'));
@@ -122,6 +122,10 @@ async function authChecks(client: Client, now: Date): Promise<Check[]> {
     if (c.status === 'paused') return { id, status: 'warn', message: `${label} is paused`, fix: `PATCH /v1/auth/connections/${c.id} {"status":"active"}` };
     if (c.tokenVerification && c.allowedOrigins.length === 0) {
       return { id, status: 'warn', message: `${label} verifies tokens but has no allowedOrigins: the widget session refuses browsers`, fix: `PATCH /v1/auth/connections/${c.id} {"allowedOrigins":["https://your.app"]}` };
+    }
+    // A refusal newer than the last sign-up: the platform is calling, and its calls are failing.
+    if (c.lastError && (!c.lastSignupAt || new Date(c.lastError.at) > new Date(c.lastSignupAt))) {
+      return { id, status: 'fail', message: `${label} refused its last call (${c.lastError.at}): ${c.lastError.code}: ${c.lastError.message}`, fix: `fix the caller's request body, then retry its failed calls (Atlas: POST /v1/instance/referrals/calls/retry_failed)` };
     }
     // Protocol connections (Atlas, custom) can't be pinged with an API key: when it last filed a sign-up says it's wired.
     // undefined: an API from before lastSignupAt, nothing to say.
@@ -156,6 +160,17 @@ async function trackingCheck(client: Client, env: NodeJS.ProcessEnv): Promise<Ch
   } catch (err) {
     if (!(err instanceof ApiError && err.status === 404)) throw err;
     out.push({ id: 'tracking', status: 'fail', message: `tracking token ${org.trackingToken} is unknown to /t/…/config.json`, fix: '/settings' });
+  }
+  // Consent mode `none` (orgs from before consent support start there): aff.js stores the referral before the visitor chooses.
+  if (org.livemode !== false) {
+    out.push(
+      ...(await guard('tracking.consent', '/settings → Install', async () => {
+        const c = await client.request<{ mode: string }>('GET', '/v1/org/tracking-consent');
+        return c.mode === 'none'
+          ? [{ id: 'tracking.consent', status: 'warn' as const, message: "tracking consent is 'none': aff.js stores the referral before the visitor chooses", fix: `PUT /v1/org/tracking-consent {"mode":"auto"} (or /settings → Install)` }]
+          : [{ id: 'tracking.consent', status: 'ok' as const, message: `tracking consent: ${c.mode}` }];
+      })),
+    );
   }
   // The token the product is configured with (run doctor with the app's env) must be this mode's.
   const name = env.REFERALLI_TRACKING_TOKEN ? 'REFERALLI_TRACKING_TOKEN' : env.NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN ? 'NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN' : null;

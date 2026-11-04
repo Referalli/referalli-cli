@@ -14,6 +14,7 @@ function healthy(over: Routes = {}): Routes {
     'GET /v1/auth/connections': [{ id: 'acon_1', provider: 'clerk', name: null, status: 'active', tokenVerification: null, allowedOrigins: [] }],
     'GET /v1/org': { id: 'org_1', trackingToken: 'tok_1' },
     'GET /t/tok_1/config.json': { cookieWindowDays: 60 },
+    'GET /v1/org/tracking-consent': { mode: 'auto' },
     ...over,
   };
 }
@@ -131,5 +132,24 @@ describe('referalli doctor', () => {
     it('no configured token: no tracking.configured line', async () => {
       expect((await run(healthy())).out).not.toContain('tracking.configured');
     });
+  });
+
+  it("warns on tracking consent 'none' for a live org (FormFlow 2026-11-04 #4)", async () => {
+    const { code, out } = await run(healthy({ 'GET /v1/org/tracking-consent': { mode: 'none' } }));
+    expect(code).toBe(0);
+    expect(out).toContain("⚠ tracking.consent: tracking consent is 'none'");
+    expect(out).toContain('fix: PUT /v1/org/tracking-consent {"mode":"auto"}');
+    expect((await run(healthy())).out).toContain('✓ tracking.consent: tracking consent: auto');
+  });
+
+  it('fails a connection whose last refusal is newer than its last sign-up (FormFlow 2026-11-04 #1)', async () => {
+    const conn = (lastError: unknown, lastSignupAt: string | null) => ({
+      'GET /v1/auth/connections': [{ id: 'acon_a', provider: 'atlas', name: 'Atlas', status: 'active', tokenVerification: null, allowedOrigins: [], lastSignupAt, lastError }],
+    });
+    const failing = await run(healthy(conn({ at: '2026-11-04T10:00:00Z', code: 'validation_error', message: 'unknown field(s): atlasUserId' }, null)));
+    expect(failing.code).toBe(1);
+    expect(failing.out).toContain('✗ auth.acon_a: atlas auth connection "Atlas" refused its last call (2026-11-04T10:00:00Z): validation_error: unknown field(s): atlasUserId');
+    const recovered = await run(healthy(conn({ at: '2026-11-04T10:00:00Z', code: 'validation_error', message: 'x' }, new Date().toISOString())));
+    expect(recovered.out).not.toContain('refused its last call');
   });
 });

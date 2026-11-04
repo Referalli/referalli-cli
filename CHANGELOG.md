@@ -5,6 +5,10 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.3 - 2026-11-04
+
+- `doctor` fails an auth connection whose last refused call (`lastError`) is newer than its last sign-up, with the error. It also warns when the org's tracking consent mode is `none` (live keys).
+
 ## 0.4.2 - 2026-11-03
 
 - Fixed: `plan`/`apply` with a `billingConnections:` list failed with `conns.filter is not a function` (the connections list now arrives in the list envelope).
