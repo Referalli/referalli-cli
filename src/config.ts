@@ -17,6 +17,18 @@ export const configDir = (env: NodeJS.ProcessEnv = process.env) =>
 
 export const configPath = (env: NodeJS.ProcessEnv = process.env) => join(configDir(env), 'cli.json');
 
+const READ_ENV = ['REFERALLI_API_KEY', 'REFERALLI_API_URL', 'REFERALLI_CONFIG_DIR', 'REFERALLI_TRACKING_TOKEN', 'NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN'];
+const oldName = (name: string) => name.replace('REFERALLI_', 'REFERALLY_');
+
+/** The env with pre-rename names filled in under the new ones (a new name wins), and which were used. */
+export function withLegacyEnv(env: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; notice: string | null } {
+  const used = READ_ENV.filter((name) => !env[name] && env[oldName(name)]);
+  return {
+    env: { ...env, ...Object.fromEntries(used.map((name) => [name, env[oldName(name)]])) },
+    notice: used.length ? `Notice: read ${used.map((name) => `${oldName(name)} as ${name}`).join(', ')}; rename it (no removal date set).` : null,
+  };
+}
+
 export function readConfig(env: NodeJS.ProcessEnv = process.env): CliConfig | null {
   // Env wins, so CI can run the CLI without a saved login.
   if (env.REFERALLI_API_KEY) {

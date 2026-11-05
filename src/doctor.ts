@@ -50,7 +50,7 @@ async function keyCheck(client: Client, now: Date): Promise<Check[]> {
     out.push({
       id: 'key.programs',
       status: 'warn',
-      message: `the key is limited to programs ${k.programIds.join(', ')}: other programs and org-wide setup aren't visible to it`,
+      message: `the key is limited to programs ${k.programIds.join(', ')}: webhook and billing checks see only these programs, and org-wide checks are skipped (listed below)`,
       fix: 'run doctor with an org-wide key to check everything',
     });
   }
@@ -196,25 +196,51 @@ async function trackingCheck(client: Client, env: NodeJS.ProcessEnv): Promise<Ch
 
 const MARK = { ok: '✓', warn: '⚠', fail: '✗' } as const;
 
+export function printChecks(out: (line: string) => void, checks: Check[], json: unknown): void {
+  if (json) {
+    out(JSON.stringify({ checks }, null, 2));
+    return;
+  }
+  for (const c of checks) {
+    out(`${MARK[c.status]} ${c.id}: ${c.message}`);
+    if (c.fix && c.status !== 'ok') out(`    fix: ${c.fix}`);
+  }
+}
+
+// What a program-scoped key is refused (the API's programScopedAllows), and the scope an org-wide key needs instead.
+const ORG_WIDE = {
+  auth: { what: 'auth connections, Atlas sign-ups', scope: 'integrations:read or connections:read' },
+  tracking: { what: 'tracking token, consent mode, configured token', scope: 'org:read' },
+} as const;
+
 /** `referalli doctor [--program <id>] [--json]`: read-only health checks. Exit 1 when any check fails. */
 export async function runDoctor(io: Io, client: Client, flags: Flags, now = new Date()): Promise<number> {
   const program = typeof flags.program === 'string' ? flags.program : undefined;
-  const checks = (
-    await Promise.all([
-      guard('key', 'referalli login', () => keyCheck(client, now)),
-      guard('programs', undefined, () => termsChecks(client, program)),
-      guard('webhooks', undefined, () => webhookChecks(client)),
-      guard('billing', undefined, () => billingChecks(client)),
-      guard('auth', undefined, () => authChecks(client, now)),
-      guard('tracking', undefined, () => trackingCheck(client, io.env)),
-    ])
-  ).flat();
-  if (flags.json) io.out(JSON.stringify({ checks }, null, 2));
-  else {
-    for (const c of checks) {
-      io.out(`${MARK[c.status]} ${c.id}: ${c.message}`);
-      if (c.fix && c.status !== 'ok') io.out(`    fix: ${c.fix}`);
-    }
-  }
+  const key = await guard('key', 'referalli login', () => keyCheck(client, now));
+  const scoped = key.some((c) => c.id === 'key.programs');
+  // Asks the API rather than copying its allowlist: if it opens one of these to scoped keys, the check just runs.
+  const orgWide = (id: keyof typeof ORG_WIDE, fn: () => Promise<Check[]>) =>
+    guard(id, undefined, async () => {
+      try {
+        return await fn();
+      } catch (err) {
+        if (!scoped || !(err instanceof ApiError) || err.status !== 403) throw err;
+        const { what, scope } = ORG_WIDE[id];
+        return [{ id, status: 'warn', message: `skipped, this program-scoped key can't read it (${what})`, fix: `run doctor with an org-wide key (no programs) with ${scope}; read or full also work` }];
+      }
+    });
+  const checks = [
+    ...key,
+    ...(
+      await Promise.all([
+        guard('programs', undefined, () => termsChecks(client, program)),
+        guard('webhooks', undefined, () => webhookChecks(client)),
+        guard('billing', undefined, () => billingChecks(client)),
+        orgWide('auth', () => authChecks(client, now)),
+        orgWide('tracking', () => trackingCheck(client, io.env)),
+      ])
+    ).flat(),
+  ];
+  printChecks((l) => io.out(l), checks, flags.json);
   return checks.some((c) => c.status === 'fail') ? 1 : 0;
 }

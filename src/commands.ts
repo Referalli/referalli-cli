@@ -1,8 +1,9 @@
 import { chmodSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { ConfigError, runApply } from './apply.js';
+import { ConfigError, listAll, runApply } from './apply.js';
 import { ApiError, createClient, type Client, type FetchFn } from './client.js';
 import { runDoctor } from './doctor.js';
+import { runScan } from './scan.js';
 import { DEFAULT_BASE_URL, readConfig, removeConfig, writeConfig, type CliConfig } from './config.js';
 
 /** Everything a command touches, injected so commands are testable. */
@@ -513,8 +514,50 @@ export async function apply(io: Io, file: string | undefined, flags: Flags, plan
   }
 }
 
-/** `referalli doctor [--program <id>] [--json]`. */
-export const doctor = (io: Io, flags: Flags): Promise<number> => runDoctor(io, signedIn(io).client, flags);
+/** `referalli doctor [--program <id>] [--json]`, or `--scan <dir> [--strict]`, which needs no key. */
+export async function doctor(io: Io, flags: Flags): Promise<number> {
+  if (flags.strict && typeof flags.scan !== 'string') throw new CliError('--strict goes with --scan <dir>');
+  if (typeof flags.scan !== 'string') return runDoctor(io, signedIn(io).client, flags);
+  try {
+    return runScan((l) => io.out(l), (l) => io.err(l), flags.scan, { strict: flags.strict === true, json: flags.json === true });
+  } catch (err) {
+    throw new CliError((err as Error).message);
+  }
+}
+
+// --- partners ----------------------------------------------------------------------
+
+/**
+ * `referalli partners list --program <id> [--since 7d|ISO] [--json]`: approved enrollments.
+ * The enrollment has the enrolled date but only the program's own externalRef; the
+ * partner list has the one that applies (program's, else the partner's) but no enrolled date.
+ */
+export async function partners(io: Io, sub: string | undefined, flags: Flags): Promise<number> {
+  if (sub !== 'list' || typeof flags.program !== 'string') throw new CliError('Usage: referalli partners list --program <id> [--since 7d|ISO] [--json]');
+  const { client } = signedIn(io);
+  const program = encodeURIComponent(flags.program);
+  const q = new URLSearchParams({ status: 'approved' });
+  if (typeof flags.since === 'string') q.set('created[gte]', parseSince(flags.since, new Date()).toISOString());
+  // A key pinned to the 2026-10-21 version gets capped arrays: ask for the paged lists.
+  const headers = { 'referalli-version': '2026-11-01' };
+  const [enrollments, people] = await Promise.all([
+    listAll<{ id: string; partnerId: string; partnerEmail: string; partnerName: string; externalRef: string | null; createdAt: string }>(client, `/v1/programs/${program}/enrollments?${q}`, headers),
+    listAll<{ id: string; externalRef: string | null; status: string }>(client, `/v1/partners?programId=${program}&includeArchived=true`, headers),
+  ]);
+  const byId = new Map(people.map((p) => [p.id, p]));
+  const rows = enrollments.map((e) => ({
+    partnerId: e.partnerId,
+    externalRef: e.externalRef ?? byId.get(e.partnerId)?.externalRef ?? null,
+    email: e.partnerEmail,
+    name: e.partnerName,
+    status: byId.get(e.partnerId)?.status ?? null,
+    enrolledAt: e.createdAt,
+  }));
+  if (flags.json) io.out(JSON.stringify(rows, null, 2));
+  else for (const r of rows) io.out([r.partnerId, r.externalRef ?? '-', r.email, r.status ?? '-', `enrolled ${r.enrolledAt}`].join('  '));
+  io.err(`${rows.length} enrolled partner(s).`);
+  return 0;
+}
 
 // --- env -------------------------------------------------------------------------
 

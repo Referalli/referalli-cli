@@ -5,6 +5,14 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.4 - 2026-11-05
+
+- `doctor --scan <dir> [--strict]`: finds the old names `REFERALLY_*`, `referally-version`, `referally_ctx`, `x-referally-*` and `@referally/*` in a source tree, each with file:line, replacement and removal date (or "no removal date set"). Warnings exit 0; `--strict` exits 1 on any. Needs no key.
+- `REFERALLY_API_KEY`, `REFERALLY_API_URL`, `REFERALLY_CONFIG_DIR` and the old tracking token names are read when the new name isn't set, with a one-line notice.
+- `plan`/`apply` manage `authConnections`: matched by provider + `instanceId`/`appId` + `program`, none deleted. The new signing secret is printed once and never written to a file. `--check` exits 2 on drift too.
+- `doctor` with a program-scoped key: the auth and tracking checks it can't run say so, with the key scope that would run them.
+- New `partners list --program <id> [--since 7d|ISO] [--json]`: every approved enrollment with its `externalRef`.
+
 ## 0.4.3 - 2026-11-04
 
 - `doctor` fails an auth connection whose last refused call (`lastError`) is newer than its last sign-up, with the error. It also warns when the org's tracking consent mode is `none` (live keys).

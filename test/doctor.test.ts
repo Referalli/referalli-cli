@@ -83,6 +83,40 @@ describe('referalli doctor', () => {
     for (const c of checks) expect(['ok', 'warn', 'fail']).toContain(c.status);
   });
 
+  it('a program-scoped key: names the checks it skipped and the scope that would run them', async () => {
+    const denied = () => err(403, 'program_scoped_key', "this API key is limited to some programs and can't call it; use an org-wide key");
+    const { code, out } = await run(
+      healthy({
+        'GET /v1/me': { apiKey: { name: 'ci', scopes: ['read'], livemode: false, expiresAt: null, programIds: ['prg_1'] } },
+        'GET /v1/auth/connections': denied(),
+        'GET /v1/org': denied(),
+      }),
+    );
+    expect(code).toBe(0);
+    expect(out).toContain("⚠ auth: skipped, this program-scoped key can't read it");
+    expect(out).toContain('with integrations:read or connections:read');
+    expect(out).toContain("⚠ tracking: skipped, this program-scoped key can't read it");
+    expect(out).toContain('with org:read');
+    expect(out).toContain('✓ webhook.we_1');
+    expect(out).not.toContain("couldn't check");
+  });
+
+  it('a program-scoped key that also lacks the scope gets the same explanation (the API checks scope first)', async () => {
+    const { out } = await run(
+      healthy({
+        'GET /v1/me': { apiKey: { name: 'ci', scopes: ['programs:read'], livemode: false, expiresAt: null, programIds: ['prg_1'] } },
+        'GET /v1/auth/connections': err(403, 'forbidden', 'this API key lacks the integrations:read scope'),
+      }),
+    );
+    expect(out).toContain('⚠ auth: skipped');
+  });
+
+  it('a 403 for an org-wide key stays a plain "couldn\'t check"', async () => {
+    const { out } = await run(healthy({ 'GET /v1/auth/connections': err(403, 'forbidden', 'needs integrations:read') }));
+    expect(out).toContain("⚠ auth: couldn't check: 403 forbidden");
+    expect(out).not.toContain('skipped');
+  });
+
   it('a 403 on one endpoint becomes a warning and the other checks still run', async () => {
     const { code, out } = await run(healthy({ 'GET /v1/billing/connections': err(403, 'forbidden', 'needs billing:read') }));
     expect(code).toBe(0);

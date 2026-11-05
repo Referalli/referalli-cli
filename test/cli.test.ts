@@ -311,6 +311,7 @@ describe('referalli CLI', () => {
       expect(t.out).toContain('REFERALLI_SCRIPT_URL=https://r.test/t/tk_test/aff.js');
       expect(t.out).toContain('REFERALLI_PROGRAM_ID=prg_t');
       expect(t.out.join('\n')).not.toMatch(/rk_test_1/);
+      expect(t.out.join('\n')).not.toContain('REFERALLY_');
     });
 
     it("--mode live from a test key: live tokens, program ids left to a live key", async () => {
@@ -327,6 +328,70 @@ describe('referalli CLI', () => {
       const t = io(envFor(), api().fetchFn);
       expect(await runCli(['env', 'pull', '--mode', 'staging'], t.io)).toBe(1);
       expect(t.err.join('\n')).toContain('--mode is live or test');
+    });
+  });
+
+  describe('REFERALLY_* environment', () => {
+    const org = () => fakeApi({ 'GET /v1/org': () => ({ id: 'org_1', name: 'Acme' }) });
+
+    it('reads the old names with a one-line notice on stderr', async () => {
+      const a = org();
+      const t = io({ ...tempEnv(), REFERALLY_API_KEY: 'rk_test_old', REFERALLY_API_URL: 'http://old.test' }, a.fetchFn);
+      expect(await runCli(['whoami'], t.io)).toBe(0);
+      expect(a.calls[0]!.url).toBe('http://old.test/v1/org');
+      expect(a.calls[0]!.headers.authorization).toBe('Bearer rk_test_old');
+      expect(t.err).toEqual(['Notice: read REFERALLY_API_KEY as REFERALLI_API_KEY, REFERALLY_API_URL as REFERALLI_API_URL; rename it (no removal date set).']);
+      expect(t.out.join('\n')).not.toContain('REFERALLY_');
+    });
+
+    it('the new name wins, with no notice', async () => {
+      const a = org();
+      const t = io({ ...tempEnv(), REFERALLI_API_KEY: 'rk_test_new', REFERALLY_API_KEY: 'rk_test_old', REFERALLI_API_URL: 'http://api.test' }, a.fetchFn);
+      expect(await runCli(['whoami'], t.io)).toBe(0);
+      expect(a.calls[0]!.headers.authorization).toBe('Bearer rk_test_new');
+      expect(t.err).toEqual([]);
+    });
+  });
+
+  describe('partners list', () => {
+    const env = () => ({ ...tempEnv(), REFERALLI_API_KEY: 'rk_test_1', REFERALLI_API_URL: 'http://api.test' });
+    const enrollment = (id: string, partnerId: string, externalRef: string | null) => ({ id, partnerId, partnerEmail: `${partnerId}@x.test`, partnerName: partnerId, externalRef, status: 'approved', createdAt: '2026-11-01T00:00:00.000Z' });
+
+    it('pages through everything; the externalRef is the enrollment\'s, else the partner\'s', async () => {
+      const a = fakeApi({
+        'GET /v1/programs/prg_1/enrollments': (_b, url) =>
+          url.includes('starting_after=enr_1')
+            ? { object: 'list', data: [enrollment('enr_2', 'ptr_2', null)], has_more: false }
+            : { object: 'list', data: [enrollment('enr_1', 'ptr_1', 'own_1')], has_more: true },
+        'GET /v1/partners': () => ({ object: 'list', data: [{ id: 'ptr_1', externalRef: 'own_1', status: 'active' }, { id: 'ptr_2', externalRef: 'user_2', status: 'suspended' }], has_more: false }),
+      });
+      const t = io(env(), a.fetchFn);
+      expect(await runCli(['partners', 'list', '--program', 'prg_1', '--json'], t.io)).toBe(0);
+      expect(JSON.parse(t.out.join('\n'))).toEqual([
+        { partnerId: 'ptr_1', externalRef: 'own_1', email: 'ptr_1@x.test', name: 'ptr_1', status: 'active', enrolledAt: '2026-11-01T00:00:00.000Z' },
+        { partnerId: 'ptr_2', externalRef: 'user_2', email: 'ptr_2@x.test', name: 'ptr_2', status: 'suspended', enrolledAt: '2026-11-01T00:00:00.000Z' },
+      ]);
+      const first = new URL(a.calls.find((c) => c.url.includes('/enrollments'))!.url);
+      expect(first.searchParams.get('status')).toBe('approved');
+      expect(first.searchParams.has('created[gte]')).toBe(false);
+      expect(a.calls.every((c) => c.headers['referalli-version'] === '2026-11-01')).toBe(true);
+    });
+
+    it('--since goes to the API as created[gte]; lines show a dash for no externalRef', async () => {
+      const a = fakeApi({
+        'GET /v1/programs/prg_1/enrollments': () => ({ object: 'list', data: [enrollment('enr_1', 'ptr_1', null)], has_more: false }),
+        'GET /v1/partners': () => ({ object: 'list', data: [{ id: 'ptr_1', externalRef: null, status: 'active' }], has_more: false }),
+      });
+      const t = io(env(), a.fetchFn);
+      expect(await runCli(['partners', 'list', '--program', 'prg_1', '--since', '2026-10-01T00:00:00Z'], t.io)).toBe(0);
+      expect(new URL(a.calls.find((c) => c.url.includes('/enrollments'))!.url).searchParams.get('created[gte]')).toBe('2026-10-01T00:00:00.000Z');
+      expect(t.out).toEqual(['ptr_1  -  ptr_1@x.test  active  enrolled 2026-11-01T00:00:00.000Z']);
+    });
+
+    it('--program is required', async () => {
+      const t = io(env(), fakeApi({}).fetchFn);
+      expect(await runCli(['partners', 'list'], t.io)).toBe(1);
+      expect(t.err.join('\n')).toContain('Usage: referalli partners list');
     });
   });
 });

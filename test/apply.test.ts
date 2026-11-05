@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -7,7 +7,7 @@ import { runCli, type Io } from '../src/index.js';
 /** An in-memory account behind the /v1 routes `plan`/`apply` use; records every call. */
 function fakeAccount() {
   type Row = Record<string, unknown> & { id: string };
-  const db = { programs: [] as Row[], rules: [] as Row[], credits: new Map<string, Row>(), hooks: [] as Row[], keys: [] as Row[], conns: [] as Row[] };
+  const db = { programs: [] as Row[], rules: [] as Row[], credits: new Map<string, Row>(), hooks: [] as Row[], keys: [] as Row[], conns: [] as Row[], auth: [] as Row[] };
   const calls: Array<{ method: string; path: string; body: Record<string, unknown> | undefined; headers: Record<string, string> }> = [];
   let n = 0;
   const id = (p: string) => `${p}_${++n}`;
@@ -78,6 +78,14 @@ function fakeAccount() {
       return ok({ ...row, webhookSecret: 'whsec_BILLINGSECRET' });
     }
     if ((m = route.match(/^PATCH \/v1\/billing\/connections\/(\w+)$/))) return ok(Object.assign(db.conns.find((c) => c.id === m![1])!, body));
+    // A plain array today; listAll takes either.
+    if (route === 'GET /v1/auth/connections') return ok(db.auth);
+    if (route === 'POST /v1/auth/connections') {
+      const row: Row = { id: id('acon'), name: '', status: 'active', autoEnrollUsers: false, destinationUrl: null, resolveBillingCustomers: false, allowedOrigins: [], ...body!, ...(['atlas', 'custom'].includes(String(body!.provider)) ? { instanceId: body!.instanceId ?? null, appId: body!.appId ?? null } : {}) };
+      db.auth.push(row);
+      return ok({ ...row, secret: 'whsec_AUTHSECRET' });
+    }
+    if ((m = route.match(/^PATCH \/v1\/auth\/connections\/(\w+)$/))) return ok(Object.assign(db.auth.find((c) => c.id === m![1])!, body));
     return new Response(JSON.stringify({ error: { code: 'not_found', message: route } }), { status: 404 });
   }) as typeof fetch;
   return { fetchFn, calls, db };
@@ -376,5 +384,102 @@ billingConnections:
     const t = harness(acct, ENV);
     expect(await runCli(['plan', writeConfig('billingConnections:\n  - name: formflow-generic\n    provider: generic\n')], t.io)).toBe(0);
     expect(t.text()).toContain('Plan: 0 to create, 0 to update, 1 unchanged.');
+  });
+
+  describe('authConnections', () => {
+    const FILE = `programs:
+  - slug: pro
+authConnections:
+  - provider: atlas
+    instanceId: inst_1
+    program: pro
+    autoEnrollUsers: true
+    destinationUrl: https://example.com/signup
+    allowedOrigins: [https://b.test, https://a.test]
+`;
+
+    it('creates once, prints the secret once (never to --secret-file), then is unchanged and catches drift', async () => {
+      const acct = fakeAccount();
+      const file = writeConfig(FILE);
+      const check = harness(acct, ENV);
+      expect(await runCli(['plan', file, '--check'], check.io)).toBe(2);
+      expect(check.text()).toContain('+ create authConnection "atlas inst_1 pro"');
+      expect(check.text()).not.toContain('whsec_');
+
+      const secretFile = join(dir(), 'secrets.json');
+      const t = harness(acct, ENV);
+      expect(await runCli(['apply', file, '--secret-file', secretFile], t.io)).toBe(0);
+      expect(t.text().match(/whsec_AUTHSECRET/g)).toHaveLength(1);
+      expect(t.text()).toContain('shown once');
+      expect(existsSync(secretFile)).toBe(false);
+      const post = acct.calls.find((c) => c.method === 'POST' && c.path === '/v1/auth/connections')!;
+      expect(post.body).toEqual({ provider: 'atlas', programId: acct.db.programs[0]!.id, instanceId: 'inst_1', autoEnrollUsers: true, destinationUrl: 'https://example.com/signup', allowedOrigins: ['https://a.test', 'https://b.test'] });
+      expect(post.headers['idempotency-key']).toMatch(/^referalli-apply-auth-/);
+
+      const same = harness(acct, ENV);
+      expect(await runCli(['plan', file, '--check'], same.io)).toBe(0);
+      expect(same.text()).toContain('= unchanged authConnection "atlas inst_1 pro"');
+
+      acct.db.auth[0]!.autoEnrollUsers = false;
+      const drift = harness(acct, ENV);
+      expect(await runCli(['plan', file, '--check'], drift.io)).toBe(2);
+      expect(drift.text()).toContain('autoEnrollUsers: false → true');
+      expect(await runCli(['apply', file], harness(acct, ENV).io)).toBe(0);
+      expect(acct.calls.at(-1)).toMatchObject({ method: 'PATCH', path: `/v1/auth/connections/${acct.db.auth[0]!.id}`, body: { autoEnrollUsers: true } });
+      expect(acct.calls.some((c) => c.method === 'DELETE')).toBe(false);
+    });
+
+    it('fields POST ignores go in a PATCH after the create; a failed PATCH has already printed the secret', async () => {
+      const acct = fakeAccount();
+      const file = writeConfig(`${FILE}    status: paused\n`);
+      expect(await runCli(['apply', file], harness(acct, ENV).io)).toBe(0);
+      expect(acct.calls.at(-1)).toMatchObject({ method: 'PATCH', body: { status: 'paused' } });
+
+      const failing = fakeAccount();
+      const refused = (async (url: string, init: RequestInit) =>
+        init.method === 'PATCH' && url.includes('/auth/connections/') ? new Response('{}', { status: 500 }) : failing.fetchFn(url, init)) as typeof fetch;
+      const t = harness({ ...failing, fetchFn: refused }, ENV);
+      expect(await runCli(['apply', file], t.io)).toBe(1);
+      expect(t.text()).toContain('whsec_AUTHSECRET');
+    });
+
+    it('matches on provider + instance + program: another program or instance is a new connection', async () => {
+      const acct = fakeAccount();
+      acct.db.programs.push({ id: 'prg_a', slug: 'pro', status: 'active', settings: {} }, { id: 'prg_b', slug: 'other', status: 'active', settings: {} });
+      acct.db.auth.push(
+        { id: 'acon_other', provider: 'clerk', programId: 'prg_b', status: 'active', allowedOrigins: [] },
+        { id: 'acon_inst', provider: 'atlas', programId: 'prg_a', instanceId: 'inst_2', appId: null, status: 'active', allowedOrigins: [] },
+      );
+      const t = harness(acct, ENV);
+      expect(await runCli(['plan', writeConfig('authConnections:\n  - { provider: clerk, program: pro }\n  - { provider: atlas, instanceId: inst_1, program: pro }\n  - { provider: atlas, instanceId: inst_2, program: pro }\n')], t.io)).toBe(0);
+      expect(t.text()).toContain('Plan: 2 to create, 0 to update, 1 unchanged.');
+
+      acct.db.auth.push({ id: 'acon_dup', provider: 'atlas', programId: 'prg_a', instanceId: 'inst_2', appId: null, status: 'paused', allowedOrigins: [] });
+      const dup = harness(acct, ENV);
+      expect(await runCli(['plan', writeConfig('authConnections:\n  - { provider: atlas, instanceId: inst_2, program: pro }\n')], dup.io)).toBe(1);
+      expect(dup.text()).toContain('acon_inst, acon_dup');
+    });
+
+    it.each([
+      ['provider: atlas, instanceId: i, program: pro, autoEnroll: true', 'unknown field "autoEnroll"'],
+      ['provider: atlas, instanceId: i, program: pro, secret: abcdefgh', 'unknown field "secret"'],
+      ['provider: atlas, program: pro', 'exactly one of instanceId or appId'],
+      ['provider: atlas, instanceId: i, appId: a, program: pro', 'exactly one of instanceId or appId'],
+      ['provider: clerk, instanceId: i, program: pro', 'for provider atlas or custom'],
+      ['provider: clerk', '"program"'],
+      ['provider: clerk, program: pro, status: off', 'active or paused'],
+      ['provider: clerk, program: pro, allowedOrigins: https://a.test', 'expected a list'],
+      ['provider: clerk, program: nope', 'unknown program "nope"'],
+    ])('refuses { %s }', async (row, message) => {
+      const t = harness(fakeAccount(), ENV);
+      expect(await runCli(['plan', writeConfig(`programs:\n  - slug: pro\nauthConnections:\n  - { ${row} }\n`)], t.io)).toBe(1);
+      expect(t.text()).toContain(message);
+    });
+
+    it('refuses the same connection listed twice', async () => {
+      const t = harness(fakeAccount(), ENV);
+      expect(await runCli(['plan', writeConfig('authConnections:\n  - { provider: clerk, program: pro }\n  - { provider: clerk, program: pro }\n')], t.io)).toBe(1);
+      expect(t.text()).toContain('listed twice');
+    });
   });
 });

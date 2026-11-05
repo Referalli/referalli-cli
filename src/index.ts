@@ -1,6 +1,7 @@
 import { parseArgs } from 'node:util';
 import { ApiError } from './client.js';
-import { api, apply, CliError, doctor, env, eventsTail, keys, login, listen, logout, logsTail, open, trigger, whoami, type Flags, type Io } from './commands.js';
+import { api, apply, CliError, doctor, env, eventsTail, keys, login, listen, logout, logsTail, open, partners, trigger, whoami, type Flags, type Io } from './commands.js';
+import { withLegacyEnv } from './config.js';
 import { VERSION } from './version.js';
 
 export { readConfig, writeConfig, configPath, type CliConfig } from './config.js';
@@ -28,16 +29,21 @@ Usage:
   referalli plan <referalli.yaml> [--check]
   referalli apply <referalli.yaml> [--plan] [--check] [--secret-file PATH]
   referalli doctor [--program <id>] [--json]
+  referalli doctor --scan <dir> [--strict] [--json]   (old Referally names in a source tree; no key needed)
+  referalli partners list --program <id> [--since 7d|ISO] [--json]
   referalli env pull [--mode live|test]   (.env lines on stdout; default: the key's mode)
 
 Environment:
   REFERALLI_API_KEY   use this key instead of the saved login
   REFERALLI_API_URL   API base URL (default: the hosted API)
   REFERALLI_CONFIG_DIR where the login is saved (default ~/.config/referalli)
-  REFERALLI_TRACKING_TOKEN  doctor checks it is this mode's token (or NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN)`;
+  REFERALLI_TRACKING_TOKEN  doctor checks it is this mode's token (or NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN)
+  REFERALLY_* spellings of these still work, with a notice`;
 
 /** Run one command; returns the process exit code. */
-export async function runCli(argv: string[], io: Io): Promise<number> {
+export async function runCli(argv: string[], baseIo: Io): Promise<number> {
+  const legacy = withLegacyEnv(baseIo.env);
+  const io: Io = { ...baseIo, env: legacy.env };
   let parsed;
   try {
     parsed = parseArgs({
@@ -70,6 +76,8 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         plan: { type: 'boolean' },
         check: { type: 'boolean' },
         json: { type: 'boolean' },
+        scan: { type: 'string' },
+        strict: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -89,6 +97,7 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
     io.out(HELP);
     return command || flags.help ? 0 : 2;
   }
+  if (legacy.notice) io.err(legacy.notice);
   try {
     switch (command) {
       case 'login':
@@ -123,6 +132,8 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         return await doctor(io, flags);
       case 'env':
         return await env(io, rest[0], flags);
+      case 'partners':
+        return await partners(io, rest[0], flags);
       default:
         io.err(`Unknown command "${command}".`);
         io.err(HELP);

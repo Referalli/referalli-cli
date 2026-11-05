@@ -6,7 +6,7 @@ import type { Client } from './client.js';
 /**
  * `referalli plan|apply <file>`: make the account match a declarative file.
  * Every resource is matched by a stable key (program slug, webhook url, API key
- * name + owner, billing connection name); creates carry an Idempotency-Key derived from that key and the
+ * name + owner, billing connection name, auth connection provider + instance + program); creates carry an Idempotency-Key derived from that key and the
  * request, so a retried apply never creates twice. Nothing missing from the file
  * is ever deleted, rotated or revoked.
  */
@@ -38,11 +38,18 @@ interface BillingConnectionSpec extends Obj {
   status?: 'active' | 'paused';
   stripeKeyEnv?: string;
 }
+interface AuthConnectionSpec extends Obj {
+  provider: string;
+  program: string;
+  instanceId?: string;
+  appId?: string;
+}
 export interface ApplyConfig {
   programs: ProgramSpec[];
   webhooks: WebhookSpec[];
   apiKeys: ApiKeySpec[];
   billingConnections: BillingConnectionSpec[];
+  authConnections: AuthConnectionSpec[];
 }
 
 // Program fields compared against GET /v1/programs/{id} and sent as-is on PATCH.
@@ -56,6 +63,12 @@ const STRIPE_KEYS = ['enabled', 'referrerMatch', 'metadataKey', 'refereeRewards'
 const WEBHOOK_KEYS = ['url', 'topics', 'programs', 'status', 'alertContacts'];
 const API_KEY_KEYS = ['name', 'owner', 'mode', 'scopes', 'expiresInDays', 'programs', 'apiVersion'];
 const BILLING_KEYS = ['name', 'provider', 'programs', 'status', 'customerRefMetadataKey', 'filter', 'stripeKeyEnv'];
+// Compared only when listed. shortcut: no tokenVerification (a preset expands on save, may hold a secret) or keys (GET doesn't return them), so no drift check; set them with `referalli api`.
+const AUTH_FIELDS = ['name', 'status', 'autoEnrollUsers', 'destinationUrl', 'resolveBillingCustomers', 'signatureVersion', 'allowedOrigins'];
+const AUTH_KEYS = ['provider', 'program', 'instanceId', 'appId', ...AUTH_FIELDS];
+// POST ignores these: they go in a PATCH right after the create.
+const AUTH_PATCH_ONLY = ['status', 'resolveBillingCustomers', 'signatureVersion'];
+const AUTH_PROTOCOL = ['atlas', 'custom'];
 const SECRET_KEYS = ['secretKey', 'stripeKey', 'webhookSecret', 'credentials'];
 // What the API stores when a rule leaves these out (packages/commissions ruleConfigSchema).
 const RULE_DEFAULTS = { appliesTo: 'gross', recurring: { type: 'lifetime' }, holdDays: 30, rounding: 'half_even', overrides: [] };
@@ -77,6 +90,8 @@ const list = (v: unknown, where: string): unknown[] => {
   return v;
 };
 
+const authKey = (a: AuthConnectionSpec | Obj) => [a.provider, a.instanceId ?? a.appId, a.program].filter(Boolean).join(' ');
+
 /** Parse and check a referalli.yaml (JSON is YAML too). */
 export function parseConfig(text: string, file = 'config'): ApplyConfig {
   let doc: unknown;
@@ -85,7 +100,7 @@ export function parseConfig(text: string, file = 'config'): ApplyConfig {
   } catch (err) {
     throw new ConfigError(`${file}: ${(err as Error).message}`);
   }
-  checkKeys(doc ?? {}, ['programs', 'webhooks', 'apiKeys', 'billingConnections'], file);
+  checkKeys(doc ?? {}, ['programs', 'webhooks', 'apiKeys', 'billingConnections', 'authConnections'], file);
   const d = (doc ?? {}) as Obj;
   const programs = list(d.programs, 'programs').map((p, i) => {
     const where = `programs[${i}]`;
@@ -125,7 +140,26 @@ export function parseConfig(text: string, file = 'config'): ApplyConfig {
   const names = billingConnections.map((b) => b.name);
   const dupName = names.find((s, i) => names.indexOf(s) !== i);
   if (dupName) throw new ConfigError(`billingConnections: name "${dupName}" is listed twice`);
-  return { programs, webhooks, apiKeys, billingConnections };
+  const authConnections = list(d.authConnections, 'authConnections').map((a, i) => {
+    const where = `authConnections[${i}]`;
+    checkKeys(a, AUTH_KEYS, where, 'provider');
+    if (typeof a.program !== 'string' || !a.program) throw new ConfigError(`${where}: "program" (a slug) is required`);
+    for (const k of ['instanceId', 'appId', 'name']) {
+      if (a[k] !== undefined && (typeof a[k] !== 'string' || !a[k])) throw new ConfigError(`${where}.${k}: expected a non-empty string`);
+    }
+    // The API drops these for other providers, so such a row could never match and each apply would create another.
+    if (!AUTH_PROTOCOL.includes(a.provider as string) && (a.instanceId || a.appId || a.signatureVersion)) {
+      throw new ConfigError(`${where}: instanceId, appId and signatureVersion are for provider atlas or custom`);
+    }
+    if (a.provider === 'atlas' && !a.instanceId === !a.appId) throw new ConfigError(`${where}: atlas needs exactly one of instanceId or appId`);
+    if (a.status !== undefined && a.status !== 'active' && a.status !== 'paused') throw new ConfigError(`${where}.status: active or paused`);
+    if (a.allowedOrigins !== undefined && !Array.isArray(a.allowedOrigins)) throw new ConfigError(`${where}.allowedOrigins: expected a list`);
+    return a as AuthConnectionSpec;
+  });
+  const authKeys = authConnections.map(authKey);
+  const dupAuth = authKeys.find((s, i) => authKeys.indexOf(s) !== i);
+  if (dupAuth) throw new ConfigError(`authConnections: "${dupAuth}" is listed twice`);
+  return { programs, webhooks, apiKeys, billingConnections, authConnections };
 }
 
 // --- planning -------------------------------------------------------------------
@@ -145,6 +179,8 @@ interface RunCtx {
   client: Client;
   /** Program slug → id, filled in as programs are created. */
   ids: Map<string, string>;
+  /** Printed at once, never to --secret-file. */
+  out(line: string): void;
 }
 
 interface ServerProgram {
@@ -168,11 +204,11 @@ const create = (client: Client, path: string, kind: string, key: string, body: u
   client.request<Obj>('POST', path, body, { headers: { 'idempotency-key': idemKey(kind, key, body) } });
 
 /** Every row of a list endpoint: a plain array, or the 2026-11-01 list envelope followed page by page. */
-async function listAll<T extends { id: string }>(client: Client, path: string): Promise<T[]> {
+export async function listAll<T extends { id: string }>(client: Client, path: string, headers?: Record<string, string>): Promise<T[]> {
   const out: T[] = [];
   let url = path;
   for (;;) {
-    const res = await client.request<T[] | { data: T[]; has_more?: boolean }>('GET', url);
+    const res = await client.request<T[] | { data: T[]; has_more?: boolean }>('GET', url, undefined, { headers });
     if (Array.isArray(res)) return res;
     out.push(...res.data);
     if (!res.has_more || res.data.length === 0) return out;
@@ -439,6 +475,57 @@ export async function buildPlan(client: Client, config: ApplyConfig, env: NodeJS
       });
     }
   }
+  if (config.authConnections.length) {
+    const conns = await listAll<Obj & { id: string; provider: string; programId: string; instanceId?: string | null; appId?: string | null; allowedOrigins: string[] }>(client, '/v1/auth/connections');
+    for (const spec of config.authConnections) {
+      const label = `authConnection "${authKey(spec)}"`;
+      checkRefs([spec.program], label);
+      const matches = conns.filter(
+        (c) => c.provider === spec.provider && c.programId === ids.get(spec.program) && (c.instanceId ?? null) === (spec.instanceId ?? null) && (c.appId ?? null) === (spec.appId ?? null),
+      );
+      if (matches.length > 1) throw new ConfigError(`${label}: ${matches.length} connections on the account match (${matches.map((c) => c.id).join(', ')}); delete the extras (DELETE /v1/auth/connections/{id})`);
+      const cur = matches[0];
+      const want: Obj = {};
+      for (const k of AUTH_FIELDS) if (spec[k] !== undefined) want[k] = k === 'allowedOrigins' ? sorted(spec[k] as string[]) : spec[k];
+      if (!cur) {
+        const { provider, program, instanceId, appId } = spec;
+        changes.push({
+          action: 'create',
+          kind: 'authConnection',
+          label,
+          fields: Object.entries({ provider, program, instanceId, appId, ...want }).filter(([, v]) => v !== undefined).map(([k, v]): Field => [k, undefined, v]),
+          run: async (ctx) => {
+            const onCreate = Object.entries(want).filter(([k, v]) => !AUTH_PATCH_ONLY.includes(k) && v !== null);
+            const made = await create(ctx.client, '/v1/auth/connections', 'auth', authKey(spec), {
+              provider,
+              programId: programIdsFor(ctx, [program])![0],
+              ...(instanceId ? { instanceId } : {}),
+              ...(appId ? { appId } : {}),
+              ...Object.fromEntries(onCreate),
+            });
+            // Printed before the PATCH: if that fails the secret still reached the user. It can't be fetched again.
+            ctx.out(`${label} is ${made.id as string}. Its signing secret, shown once and saved nowhere (--secret-file doesn't take it), so store it now: ${made.secret as string}`);
+            const after = Object.entries(want).filter(([k]) => AUTH_PATCH_ONLY.includes(k));
+            if (after.length) await ctx.client.request('PATCH', `/v1/auth/connections/${made.id as string}`, Object.fromEntries(after));
+            return [];
+          },
+        });
+        continue;
+      }
+      const now = (k: string) => (k === 'allowedOrigins' ? sorted(cur.allowedOrigins) : cur[k]);
+      const fields: Field[] = Object.keys(want).filter((k) => !same(now(k), want[k])).map((k) => [k, now(k), want[k]]);
+      changes.push({
+        action: fields.length ? 'update' : 'noop',
+        kind: 'authConnection',
+        label,
+        fields,
+        run: async (ctx) => {
+          await ctx.client.request('PATCH', `/v1/auth/connections/${cur.id}`, Object.fromEntries(fields.map(([k, , v]) => [k, v])));
+          return [];
+        },
+      });
+    }
+  }
   return { changes, ids };
 }
 
@@ -485,7 +572,7 @@ export async function runApply(
   if (!opts.apply || pending.length === 0) return 0;
   // Checked first: a secret file that can't be written after the creates would lose the secrets.
   if (opts.secretFile && existsSync(opts.secretFile)) throw new ConfigError(`--secret-file ${opts.secretFile} already exists; pick a new path`);
-  const ctx: RunCtx = { client, ids };
+  const ctx: RunCtx = { client, ids, out: (line) => io.out(line) };
   const secrets: Array<[string, string]> = [];
   try {
     for (const c of pending) {
