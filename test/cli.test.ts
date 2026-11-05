@@ -47,6 +47,14 @@ describe('referalli CLI', () => {
     expect(api.calls[0]!.body).toMatchObject({ programIds: ['prg_a', 'prg_b'], expiresAt: '2027-01-01T00:00:00Z' });
   });
 
+  it('keys create explains an empty --programs', async () => {
+    const api = fakeApi({});
+    const t = io({ ...tempEnv(), REFERALLI_API_KEY: 'rk_admin' }, api.fetchFn);
+    expect(await runCli(['keys', 'create', '--name', 'n', '--programs', ''], t.io)).not.toBe(0);
+    expect(t.err.join()).toContain('--programs needs at least one program id');
+    expect(api.calls).toEqual([]);
+  });
+
   it('partners list exits non-zero on an unknown program', async () => {
     const api = fakeApi({});
     const t = io({ ...tempEnv(), REFERALLI_API_KEY: 'rk_admin' }, api.fetchFn);

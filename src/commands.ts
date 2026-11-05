@@ -433,7 +433,11 @@ export async function keys(io: Io, sub: string | undefined, arg: string | undefi
     if (typeof flags.scopes === 'string') body.scopes = flags.scopes.split(',').map((x) => x.trim()).filter(Boolean);
     if (typeof flags['expires-days'] === 'string') body.expiresInDays = Number(flags['expires-days']);
     if (typeof flags['expires-at'] === 'string') body.expiresAt = flags['expires-at'];
-    if (typeof flags.programs === 'string') body.programIds = flags.programs.split(',').map((x) => x.trim()).filter(Boolean);
+    if (flags.programs !== undefined) {
+      const programIds = String(flags.programs).split(',').map((x) => x.trim()).filter(Boolean);
+      if (programIds.length === 0) throw new CliError('--programs needs at least one program id');
+      body.programIds = programIds;
+    }
     const res = await client.request<IssuedKey | { pairId: string; live: IssuedKey; test: IssuedKey }>('POST', '/v1/api-keys', body);
     const issued = 'live' in res ? [res.live, res.test] : [res];
     io.out('Each key is shown once. Store it now (a password manager or your secrets store):');
