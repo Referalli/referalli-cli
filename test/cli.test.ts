@@ -40,6 +40,19 @@ function io(env: NodeJS.ProcessEnv, fetchFn: typeof fetch) {
 const tempEnv = () => ({ REFERALLI_CONFIG_DIR: mkdtempSync(join(tmpdir(), 'referalli-cli-')) });
 
 describe('referalli CLI', () => {
+  it('keys create sends --programs and --expires-at', async () => {
+    const api = fakeApi({ 'POST /v1/api-keys': () => ({ id: 'k', key: 'rk_x', livemode: false }) });
+    const t = io({ ...tempEnv(), REFERALLI_API_KEY: 'rk_admin' }, api.fetchFn);
+    expect(await runCli(['keys', 'create', '--name', 'n', '--mode', 'test', '--programs', 'prg_a, prg_b', '--expires-at', '2027-01-01T00:00:00Z'], t.io)).toBe(0);
+    expect(api.calls[0]!.body).toMatchObject({ programIds: ['prg_a', 'prg_b'], expiresAt: '2027-01-01T00:00:00Z' });
+  });
+
+  it('partners list exits non-zero on an unknown program', async () => {
+    const api = fakeApi({});
+    const t = io({ ...tempEnv(), REFERALLI_API_KEY: 'rk_admin' }, api.fetchFn);
+    expect(await runCli(['partners', 'list', '--program', 'prg_nope'], t.io)).not.toBe(0);
+  });
+
   it('login --key checks the key and saves it mode 600', async () => {
     const env = tempEnv();
     const api = fakeApi({ 'GET /v1/org': () => ({ id: 'org_1', name: 'Acme' }) });

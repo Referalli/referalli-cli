@@ -5,6 +5,11 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.5 - 2026-11-05
+
+- `keys create` takes `--programs ID,…` and `--expires-at ISO`.
+- `partners list --program` with an unknown id now fails with a 404 and a non-zero exit, rather than "0 enrolled partner(s)". Needs the API from 2026-11-05.
+
 ## 0.4.4 - 2026-11-05
 
 - `doctor --scan <dir> [--strict]`: finds the old names `REFERALLY_*`, `referally-version`, `referally_ctx`, `x-referally-*` and `@referally/*` in a source tree, each with file:line, replacement and removal date (or "no removal date set"). Warnings exit 0; `--strict` exits 1 on any. Needs no key.

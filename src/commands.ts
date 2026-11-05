@@ -425,13 +425,15 @@ interface ListedKey {
 export async function keys(io: Io, sub: string | undefined, arg: string | undefined, flags: Flags): Promise<number> {
   const { client } = signedIn(io);
   if (sub === 'create') {
-    if (typeof flags.name !== 'string') throw new CliError('Usage: referalli keys create --name NAME [--owner WHO] [--mode both|live|test] [--scopes full,…] [--expires-days N]');
+    if (typeof flags.name !== 'string') throw new CliError('Usage: referalli keys create --name NAME [--owner WHO] [--mode both|live|test] [--scopes full,…] [--programs ID,…] [--expires-days N | --expires-at ISO]');
     const mode = typeof flags.mode === 'string' ? flags.mode : 'both';
     if (!['both', 'live', 'test'].includes(mode)) throw new CliError('--mode is both, live or test');
     const body: Record<string, unknown> = { name: flags.name, mode };
     if (typeof flags.owner === 'string') body.owner = flags.owner;
     if (typeof flags.scopes === 'string') body.scopes = flags.scopes.split(',').map((x) => x.trim()).filter(Boolean);
     if (typeof flags['expires-days'] === 'string') body.expiresInDays = Number(flags['expires-days']);
+    if (typeof flags['expires-at'] === 'string') body.expiresAt = flags['expires-at'];
+    if (typeof flags.programs === 'string') body.programIds = flags.programs.split(',').map((x) => x.trim()).filter(Boolean);
     const res = await client.request<IssuedKey | { pairId: string; live: IssuedKey; test: IssuedKey }>('POST', '/v1/api-keys', body);
     const issued = 'live' in res ? [res.live, res.test] : [res];
     io.out('Each key is shown once. Store it now (a password manager or your secrets store):');

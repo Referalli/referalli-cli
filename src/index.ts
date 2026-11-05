@@ -23,7 +23,7 @@ Usage:
   referalli logs tail [--max N]
   referalli open [docs|dashboard|keys|webhooks|spec|status]
   referalli api <METHOD> <path> [--data JSON] [--secret-file PATH]
-  referalli keys create --name NAME [--owner WHO] [--mode both|live|test] [--scopes full,…] [--expires-days N]
+  referalli keys create --name NAME [--owner WHO] [--mode both|live|test] [--scopes full,…] [--programs ID,…] [--expires-days N | --expires-at ISO]
   referalli keys list [--owner WHO] [--mode live|test]
   referalli keys revoke <key id> [--pair] [--cascade]
   referalli plan <referalli.yaml> [--check]
@@ -71,6 +71,8 @@ export async function runCli(argv: string[], baseIo: Io): Promise<number> {
         mode: { type: 'string' },
         scopes: { type: 'string' },
         'expires-days': { type: 'string' },
+        'expires-at': { type: 'string' },
+        programs: { type: 'string' },
         pair: { type: 'boolean' },
         cascade: { type: 'boolean' },
         plan: { type: 'boolean' },
