@@ -5,6 +5,12 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.7 - 2026-11-07
+
+### Added
+
+- `referalli doctor --program <id> --e2e` tests one program from outside: `aff.js` loads, destinations answer, the page includes `aff.js`, a `/go` link redirects with its code, and with a test key a test sign-up and payment are recorded.
+
 ## 0.4.6 - 2026-11-05
 
 - `keys create --programs ''` explains itself rather than printing the server's bare 400.

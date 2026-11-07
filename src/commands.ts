@@ -523,6 +523,7 @@ export async function apply(io: Io, file: string | undefined, flags: Flags, plan
 /** `referalli doctor [--program <id>] [--json]`, or `--scan <dir> [--strict]`, which needs no key. */
 export async function doctor(io: Io, flags: Flags): Promise<number> {
   if (flags.strict && typeof flags.scan !== 'string') throw new CliError('--strict goes with --scan <dir>');
+  if (flags.e2e && typeof flags.program !== 'string') throw new CliError('--e2e tests one program: add --program <id>');
   if (typeof flags.scan !== 'string') return runDoctor(io, signedIn(io).client, flags);
   try {
     return runScan((l) => io.out(l), (l) => io.err(l), flags.scan, { strict: flags.strict === true, json: flags.json === true });

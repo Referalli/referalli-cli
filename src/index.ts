@@ -29,6 +29,7 @@ Usage:
   referalli plan <referalli.yaml> [--check]
   referalli apply <referalli.yaml> [--plan] [--check] [--secret-file PATH]
   referalli doctor [--program <id>] [--json]
+  referalli doctor --program <id> --e2e [--json]      (also tests the program from outside; see the docs)
   referalli doctor --scan <dir> [--strict] [--json]   (old Referally names in a source tree; no key needed)
   referalli partners list --program <id> [--since 7d|ISO] [--json]
   referalli env pull [--mode live|test]   (.env lines on stdout; default: the key's mode)
@@ -80,6 +81,7 @@ export async function runCli(argv: string[], baseIo: Io): Promise<number> {
         json: { type: 'boolean' },
         scan: { type: 'string' },
         strict: { type: 'boolean' },
+        e2e: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },

@@ -22,7 +22,7 @@ function healthy(over: Routes = {}): Routes {
 function run(routes: Routes, args: string[] = [], extraEnv: Record<string, string> = {}) {
   const fetchFn = (async (url: string, init: RequestInit) => {
     const r = routes[`${init.method} ${new URL(url).pathname}`];
-    if (r instanceof Response) return r;
+    if (r instanceof Response) return r.clone();
     if (r === undefined) return new Response(JSON.stringify({ error: { code: 'not_found', message: 'nope' } }), { status: 404 });
     return new Response(JSON.stringify(r), { status: 200 });
   }) as typeof fetch;
@@ -42,6 +42,47 @@ function run(routes: Routes, args: string[] = [], extraEnv: Record<string, strin
 const err = (status: number, code: string, message: string) => new Response(JSON.stringify({ error: { code, message } }), { status });
 
 describe('referalli doctor', () => {
+  const e2e = (over: Routes = {}) =>
+    healthy({
+      'GET /v1/programs/prg_1': { id: 'prg_1', name: 'Pro', status: 'active' },
+      'GET /v1/org': { id: 'org_1', trackingToken: 'tok_1', livemode: false },
+      'GET /t/tok_1/aff.js': new Response('//js'),
+      'GET /v1/links': [{ code: 'abc', destinationUrl: 'http://shop.test/' }],
+      'GET /': new Response('<script src="https://referalli.com/t/tok_1/aff.js"></script>'),
+      'GET /go/tok_1/abc': new Response(null, { status: 302, headers: { location: 'http://shop.test/?via=abc' } }),
+      'POST /v1/sandbox/simulate': { ok: true },
+      ...over,
+    });
+  const byId = (out: string) => Object.fromEntries((JSON.parse(out) as { checks: Array<{ id: string; status: string }> }).checks.map((c) => [c.id, c.status]));
+
+  it('--e2e walks one program from outside and files a test conversion with a test key', async () => {
+    const { out } = await run(e2e(), ['--json', '--program', 'prg_1', '--e2e']);
+    expect(byId(out)).toMatchObject({ 'e2e.script': 'ok', 'e2e.destination': 'ok', 'e2e.landing': 'ok', 'e2e.go': 'ok', 'e2e.cookie': 'warn', 'e2e.conversion': 'ok' });
+  });
+
+  it('--e2e fails on a dead destination, and a live key never files a conversion', async () => {
+    const routes = e2e({
+      'GET /v1/me': { apiKey: { name: 'ci', scopes: ['full'], livemode: true, expiresAt: null, programIds: null } },
+      'GET /': new Response('gone', { status: 404 }),
+    });
+    const { code, out } = await run(routes, ['--json', '--program', 'prg_1', '--e2e']);
+    expect(code).toBe(1);
+    expect(byId(out)).toMatchObject({ 'e2e.destination': 'fail', 'e2e.conversion': 'warn' });
+  });
+
+  it('--e2e runs with a program-scoped key, taking the token from the env', async () => {
+    const refused = () => err(403, 'program_scoped_key', 'this key is limited to some programs');
+    const scoped = () => e2e({ 'GET /v1/org': refused(), 'GET /v1/auth/connections': refused() });
+    const withToken = await run(scoped(), ['--json', '--program', 'prg_1', '--e2e'], { REFERALLI_TRACKING_TOKEN: 'tok_1' });
+    expect(byId(withToken.out)).toMatchObject({ 'e2e.script': 'ok', 'e2e.destination': 'ok', 'e2e.go': 'ok' });
+    const without = await run(scoped(), ['--json', '--program', 'prg_1', '--e2e']);
+    expect(byId(without.out)).toMatchObject({ e2e: 'warn' });
+  });
+
+  it('--e2e needs --program', async () => {
+    expect((await run(healthy(), ['--e2e'])).out).toContain('--program');
+  });
+
   it('all good: every check ✓ and exit 0; archived programs are skipped', async () => {
     const { code, out } = await run(healthy());
     expect(code).toBe(0);

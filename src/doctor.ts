@@ -213,7 +213,92 @@ const ORG_WIDE = {
   tracking: { what: 'tracking token, consent mode, configured token', scope: 'org:read' },
 } as const;
 
-/** `referalli doctor [--program <id>] [--json]`: read-only health checks. Exit 1 when any check fails. */
+interface E2eLink { code: string; destinationUrl: string | null }
+const OUTSIDE = { method: 'GET', headers: { 'user-agent': 'referalli-doctor-bot' } };
+
+/** One program from outside, as a visitor would meet it. Runs here, not on the API, so it can't be aimed at our own network. */
+async function e2eChecks(client: Client, programId: string, fetchFn: typeof fetch, env: NodeJS.ProcessEnv): Promise<Check[]> {
+  const out: Check[] = [];
+  const get = (url: string, redirect: 'follow' | 'manual' = 'follow') => fetchFn(url, { ...OUTSIDE, redirect, signal: AbortSignal.timeout(10_000) });
+  const me = await client.request<Me>('GET', '/v1/me');
+  // A program-scoped key can't read the org; the token is public (it's in every page's script tag), so the env can supply it.
+  const trackingToken = await client
+    .request<{ trackingToken: string }>('GET', '/v1/org')
+    .then((o) => o.trackingToken)
+    .catch((err: unknown) => {
+      if (err instanceof ApiError && err.status === 403) return env.REFERALLI_TRACKING_TOKEN ?? env.NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN;
+      throw err;
+    });
+  if (!trackingToken) {
+    return [{ id: 'e2e', status: 'warn', message: "skipped: this key can't read the org's tracking token", fix: 'set REFERALLI_TRACKING_TOKEN and run again' }];
+  }
+  const live = me.apiKey?.livemode !== false;
+  const scriptPath = `/t/${encodeURIComponent(trackingToken)}/aff.js`;
+
+  const script = await get(`${client.baseUrl}${scriptPath}`).catch((err: Error) => err);
+  out.push(
+    script instanceof Response && script.ok
+      ? { id: 'e2e.script', status: 'ok', message: 'aff.js loads' }
+      : { id: 'e2e.script', status: 'fail', message: `aff.js didn't load: ${script instanceof Response ? script.status : script.message}` },
+  );
+
+  const links = rows(await client.request<E2eLink[] | { data: E2eLink[] }>('GET', `/v1/links?programId=${encodeURIComponent(programId)}&limit=20`));
+  type Conn = { programId: string; destinationUrl?: string | null };
+  // A key without connections:read can still test its links.
+  const conns = await client.request<Conn[] | { data: Conn[] }>('GET', '/v1/auth/connections').then(rows, (): Conn[] => []);
+  const link = links.find((l) => l.destinationUrl);
+  const destinations = [
+    ...new Set(
+      [...conns.filter((c) => c.programId === programId).map((c) => c.destinationUrl), link?.destinationUrl]
+        .filter((d): d is string => !!d)
+        .map((d) => d.replaceAll('{code}', link?.code ?? 'doctor').replaceAll('%7Bcode%7D', link?.code ?? 'doctor')),
+    ),
+  ];
+  if (destinations.length === 0) out.push({ id: 'e2e.destination', status: 'warn', message: 'no destination to test: no link or auth connection in this program has one' });
+  for (const url of destinations) {
+    const res = await get(url).catch((err: Error) => err);
+    if (!(res instanceof Response) || !res.ok) {
+      out.push({ id: 'e2e.destination', status: 'fail', message: `${url} didn't answer 200: ${res instanceof Response ? res.status : res.message}`, fix: 'update destinationUrl on the link or auth connection' });
+      continue;
+    }
+    out.push({ id: 'e2e.destination', status: 'ok', message: `${url} answers ${res.status}` });
+    const html = await res.text();
+    out.push(
+      html.includes(scriptPath)
+        ? { id: 'e2e.landing', status: 'ok', message: `${url} includes aff.js with this org's token` }
+        : { id: 'e2e.landing', status: 'warn', message: `${url} doesn't include aff.js with this org's token in its HTML (a tag manager would load it later)`, fix: '/settings → Install' },
+    );
+  }
+
+  if (!link) {
+    out.push({ id: 'e2e.go', status: 'warn', message: 'no partner link to test in this program' });
+  } else {
+    const res = await get(`${client.baseUrl}/go/${encodeURIComponent(trackingToken)}/${encodeURIComponent(link.code)}`, 'manual').catch((err: Error) => err);
+    const to = res instanceof Response ? res.headers.get('location') : null;
+    out.push(
+      to?.includes(`via=${encodeURIComponent(link.code)}`)
+        ? { id: 'e2e.go', status: 'ok', message: `/go/…/${link.code} redirects with the code` }
+        : { id: 'e2e.go', status: 'fail', message: `/go/…/${link.code} didn't redirect with its code: ${res instanceof Response ? res.status : res.message}` },
+    );
+  }
+  out.push({ id: 'e2e.cookie', status: 'warn', message: 'not checked: aff.js sets the cookie in a browser', fix: 'open a /go link in a browser and look for the referral cookie' });
+
+  if (live) {
+    out.push({ id: 'e2e.conversion', status: 'warn', message: 'skipped with a live key, so it never earns real commissions', fix: 'run again with a test key and a test-mode program' });
+  } else if (!link) {
+    out.push({ id: 'e2e.conversion', status: 'warn', message: 'skipped: it needs a partner link in this program' });
+  } else {
+    try {
+      await client.request('POST', '/v1/sandbox/simulate', { scenario: 'signup_and_pay', programId, code: link.code });
+      out.push({ id: 'e2e.conversion', status: 'ok', message: 'test sign-up and payment recorded' });
+    } catch (err) {
+      out.push({ id: 'e2e.conversion', status: 'fail', message: `test sign-up and payment failed: ${reason(err)}` });
+    }
+  }
+  return out;
+}
+
+/** `referalli doctor [--program <id>] [--json]`: read-only health checks, plus `--e2e`. Exit 1 when any check fails. */
 export async function runDoctor(io: Io, client: Client, flags: Flags, now = new Date()): Promise<number> {
   const program = typeof flags.program === 'string' ? flags.program : undefined;
   const key = await guard('key', 'referalli login', () => keyCheck(client, now));
@@ -238,6 +323,7 @@ export async function runDoctor(io: Io, client: Client, flags: Flags, now = new 
         guard('billing', undefined, () => billingChecks(client)),
         orgWide('auth', () => authChecks(client, now)),
         orgWide('tracking', () => trackingCheck(client, io.env)),
+        ...(flags.e2e && program ? [guard('e2e', undefined, () => e2eChecks(client, program, io.fetchFn ?? fetch, io.env))] : []),
       ])
     ).flat(),
   ];
