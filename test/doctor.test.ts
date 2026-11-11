@@ -15,6 +15,9 @@ function healthy(over: Routes = {}): Routes {
     'GET /v1/org': { id: 'org_1', trackingToken: 'tok_1' },
     'GET /t/tok_1/config.json': { cookieWindowDays: 60 },
     'GET /v1/org/tracking-consent': { mode: 'auto' },
+    'GET /v1/programs/prg_1': { id: 'prg_1', name: 'Pro', status: 'active' },
+    'GET /v1/integration-health': { ok: true, checks: [{ id: 'billing.bcon_1', ok: true, detail: 'Last event received 2026-11-10T00:00:00.000Z.' }] },
+    'GET /v1/commissions': [],
     ...over,
   };
 }
@@ -22,6 +25,7 @@ function healthy(over: Routes = {}): Routes {
 function run(routes: Routes, args: string[] = [], extraEnv: Record<string, string> = {}) {
   const fetchFn = (async (url: string, init: RequestInit) => {
     const r = routes[`${init.method} ${new URL(url).pathname}`];
+    if (typeof r === 'function') return (r as (u: URL) => Response)(new URL(url)); // answers by query
     if (r instanceof Response) return r.clone();
     if (r === undefined) return new Response(JSON.stringify({ error: { code: 'not_found', message: 'nope' } }), { status: 404 });
     return new Response(JSON.stringify(r), { status: 200 });
@@ -116,7 +120,7 @@ describe('referalli doctor', () => {
     const by = Object.fromEntries(checks.map((c) => [c.id, c]));
     expect(by.key!.status).toBe('ok');
     expect(by['key.expiry']!.status).toBe('warn');
-    expect(by['key.programs']!.status).toBe('warn');
+    expect(by['key.programs']!.status).toBe('ok'); // R-08: a scoped key is normal; the checks cover its programs
     expect(by['program.prg_1.terms']).toMatchObject({ status: 'fail', message: expect.stringContaining('no commission rule') });
     expect(by.billing).toMatchObject({ status: 'warn', message: expect.stringContaining('no billing connection') });
     expect(by['auth.acon_1']!.status).toBe('warn');
@@ -226,5 +230,93 @@ describe('referalli doctor', () => {
     expect(failing.out).toContain('✗ auth.acon_a: atlas auth connection "Atlas" refused its last call (2026-11-04T10:00:00Z): validation_error: unknown field(s): atlasUserId');
     const recovered = await run(healthy(conn({ at: '2026-11-04T10:00:00Z', code: 'validation_error', message: 'x' }, new Date().toISOString())));
     expect(recovered.out).not.toContain('refused its last call');
+  });
+
+  describe('FormFlow 2026-11-11: scope, integration health and the new checks', () => {
+    const live = { 'GET /v1/me': { apiKey: { name: 'ci', scopes: ['full'], livemode: true, expiresAt: null, programIds: null } } };
+    const statuses = (out: string) => Object.fromEntries((JSON.parse(out) as { checks: Array<{ id: string; status: string }> }).checks.map((c) => [c.id, c.status]));
+
+    it("R-08: REFERALLI_PROGRAM_ID scopes doctor; another program's broken connections don't fail it", async () => {
+      const routes = healthy({
+        'GET /v1/billing/connections': [
+          { id: 'bcon_1', provider: 'stripe', name: 'Stripe', status: 'active', programIds: ['prg_1'] },
+          { id: 'bcon_2', provider: 'paddle', name: 'Other', status: 'awaiting_secret', programIds: ['prg_2'] },
+        ],
+        'GET /v1/auth/connections': [
+          { id: 'acon_1', provider: 'clerk', programId: 'prg_1', name: null, status: 'active', tokenVerification: null, allowedOrigins: [] },
+          { id: 'acon_2', provider: 'custom', programId: 'prg_2', name: null, status: 'active', tokenVerification: null, allowedOrigins: [], lastSignupAt: null, lastError: { at: '2026-11-01T00:00:00Z', code: 'x', message: 'y' } },
+        ],
+      });
+      const all = await run(routes);
+      expect(all.code).toBe(1);
+      const scoped = await run(routes, [], { REFERALLI_PROGRAM_ID: 'prg_1' });
+      expect(scoped.code).toBe(0);
+      expect(scoped.out).not.toContain('bcon_2');
+      expect(scoped.out).not.toContain('acon_2');
+      // The key's own scope does the same.
+      const byKey = await run({ ...routes, 'GET /v1/me': { apiKey: { name: 'ci', scopes: ['full'], livemode: false, expiresAt: null, programIds: ['prg_1'] } } });
+      expect(byKey.code).toBe(0);
+      expect(byKey.out).toContain('✓ key.programs');
+    });
+
+    it('R-12: every integration-health check shows up, ✗ only for severity error', async () => {
+      const { code, out } = await run(
+        healthy({
+          'GET /v1/integration-health': {
+            ok: false,
+            checks: [
+              { id: 'billing.bcon_1', ok: false, detail: 'generic connection has never received an event.', fix: 'Send a test event.' },
+              { id: 'payouts.connection', ok: false, detail: 'No payout connection.', severity: 'error' },
+              { id: 'tracking.snippet', ok: true, detail: 'aff.js reported a visit.' },
+            ],
+          },
+        }),
+        ['--json'],
+      );
+      expect(code).toBe(1);
+      expect(statuses(out)).toMatchObject({ 'health.billing.bcon_1': 'warn', 'health.payouts.connection': 'fail', 'health.tracking.snippet': 'ok' });
+    });
+
+    it('R-12: payout connection, email provider, Atlas widget, unpaid commissions and the join page', async () => {
+      const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
+      const program = { id: 'prg_1', name: 'Pro', status: 'active', publicHandle: 'pro', publicPage: { autoApprove: false }, settings: { settlement: 'payout', widget: { autoEnroll: false, destinationUrl: null } } };
+      const routes = healthy({
+        ...live,
+        'GET /v1/programs': [program],
+        'GET /v1/payout-connections': [],
+        'GET /v1/email/settings': { provider: null, hasApiKey: false },
+        'GET /v1/auth/connections': [{ id: 'acon_a', provider: 'atlas', programId: 'prg_1', name: 'Atlas', status: 'active', tokenVerification: null, allowedOrigins: [], lastSignupAt: new Date().toISOString() }],
+        'GET /v1/commissions': (u: URL) => new Response(JSON.stringify(u.searchParams.get('type') === 'approved' ? [{ id: 'cev_1', type: 'approved', relatedCommissionId: 'cev_0', ts: old }] : [])),
+        'GET /v1/public/programs/pro': { name: 'Pro' },
+        'GET /join/pro': new Response('gone', { status: 404 }),
+      });
+      const { code, out } = await run(routes, ['--json']);
+      expect(code).toBe(1); // the join page
+      expect(statuses(out)).toMatchObject({
+        'payouts.connection': 'warn',
+        'email.provider': 'warn',
+        'widget.prg_1': 'warn',
+        'commissions.prg_1.unpaid': 'warn',
+        'join.prg_1': 'fail',
+      });
+      const fixed = await run({
+        ...routes,
+        'GET /v1/payout-connections': [{ provider: 'stripe', status: 'active' }],
+        'GET /v1/email/settings': { provider: 'resend', hasApiKey: true },
+        'GET /v1/programs': [{ ...program, settings: { settlement: 'payout', widget: { autoEnroll: true, destinationUrl: 'https://x.test' } } }],
+        'GET /join/pro': new Response('<html>'),
+      }, ['--json']);
+      expect(statuses(fixed.out)).toMatchObject({ 'payouts.connection': 'ok', 'email.provider': 'ok', 'join.prg_1': 'ok' });
+      expect(statuses(fixed.out)['widget.prg_1']).toBeUndefined();
+    });
+
+    it('R-30: staleness reads lastSignupReceivedAt when the API sends it', async () => {
+      const { out } = await run(
+        healthy({
+          'GET /v1/auth/connections': [{ id: 'acon_a', provider: 'atlas', name: 'Atlas', status: 'active', tokenVerification: null, allowedOrigins: [], lastSignupAt: new Date().toISOString(), lastSignupReceivedAt: '2020-01-01T00:00:00.000Z' }],
+        }),
+      );
+      expect(out).toContain('⚠ auth.acon_a: atlas auth connection "Atlas" is active; no sign-up since 2020-01-01T00:00:00.000Z');
+    });
   });
 });

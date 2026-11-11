@@ -361,7 +361,7 @@ describe('referalli CLI', () => {
       expect(await runCli(['whoami'], t.io)).toBe(0);
       expect(a.calls[0]!.url).toBe('http://old.test/v1/org');
       expect(a.calls[0]!.headers.authorization).toBe('Bearer rk_test_old');
-      expect(t.err).toEqual(['Notice: read REFERALLY_API_KEY as REFERALLI_API_KEY, REFERALLY_API_URL as REFERALLI_API_URL; rename it (no removal date set).']);
+      expect(t.err).toEqual(['Notice: read REFERALLY_API_KEY as REFERALLI_API_KEY, REFERALLY_API_URL as REFERALLI_API_URL; rename it (read until 2027-03-31).']);
       expect(t.out.join('\n')).not.toContain('REFERALLY_');
     });
 
@@ -371,6 +371,26 @@ describe('referalli CLI', () => {
       expect(await runCli(['whoami'], t.io)).toBe(0);
       expect(a.calls[0]!.headers.authorization).toBe('Bearer rk_test_new');
       expect(t.err).toEqual([]);
+    });
+  });
+
+  describe('billing owner set', () => {
+    it('records the owner and says what changed', async () => {
+      const api = fakeApi({
+        'PUT /v1/billing/accounts/org%2F1/owner': () => ({ accountRef: 'org/1', ownerCustomerRef: 'user_42', previousOwnerCustomerRef: null, changed: true, relinked: 1, reprocessedPayments: 2 }),
+      });
+      const t = io({ ...tempEnv(), REFERALLI_API_KEY: 'rk_admin' }, api.fetchFn);
+      expect(await runCli(['billing', 'owner', 'set', 'org/1', 'user_42'], t.io)).toBe(0);
+      expect(api.calls[0]).toMatchObject({ method: 'PUT', body: { ownerCustomerRef: 'user_42' } });
+      expect(t.out.join('\n')).toContain('org/1 is now owned by user_42: 1 customer(s) relinked, 2 earlier payment(s) reprocessed.');
+    });
+
+    it('prints usage for missing arguments without calling the API', async () => {
+      const api = fakeApi({});
+      const t = io({ ...tempEnv(), REFERALLI_API_KEY: 'rk_admin' }, api.fetchFn);
+      expect(await runCli(['billing', 'owner', 'set', 'org_1'], t.io)).toBe(1);
+      expect(t.err.join('\n')).toContain('Usage: referalli billing owner set <accountRef> <customerRef>');
+      expect(api.calls).toEqual([]);
     });
   });
 

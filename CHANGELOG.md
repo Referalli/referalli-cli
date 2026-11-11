@@ -5,6 +5,19 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.8 - 2026-11-11
+
+### Added
+- `doctor` runs every `/v1/integration-health` check, plus payouts, email provider, widget setup, unpaid approved commissions and the public join page.
+- `doctor` and `plan --prune` stay inside the key's programs; `REFERALLI_PROGRAM_ID` sets the default `--program`.
+- Webhooks in the yaml can match by `id`, so a URL change updates the endpoint and keeps its secret. `plan`/`apply --prune` delete what the file no longer lists.
+- New yaml sections: `payouts`, `email`, `trackingConsent`, `hostedPages`; program fields `widget`, `refereeReward`, `brand`, `termsUrl`, `faqUrl`, `supportUrl`, `trackingConsent`; `authConnections[].tokenVerification`.
+- `referalli billing owner set <accountRef> <customerRef>`.
+
+### Changed
+- Unknown webhook topics are rejected with a suggestion. Endpoints managed by Atlas (`managedBy`) are not compared on topics.
+- `doctor --scan` warns only on the old names Referalli itself read; other `REFERALLY_*` names are info.
+
 ## 0.4.7 - 2026-11-07
 
 ### Added

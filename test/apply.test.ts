@@ -7,7 +7,21 @@ import { runCli, type Io } from '../src/index.js';
 /** An in-memory account behind the /v1 routes `plan`/`apply` use; records every call. */
 function fakeAccount() {
   type Row = Record<string, unknown> & { id: string };
-  const db = { programs: [] as Row[], rules: [] as Row[], credits: new Map<string, Row>(), hooks: [] as Row[], keys: [] as Row[], conns: [] as Row[], auth: [] as Row[] };
+  const db = {
+    programs: [] as Row[],
+    rules: [] as Row[],
+    credits: new Map<string, Row>(),
+    hooks: [] as Row[],
+    keys: [] as Row[],
+    conns: [] as Row[],
+    auth: [] as Row[],
+    payouts: [] as Row[],
+    email: { provider: null, hasApiKey: false, fromAddress: null, fromName: null } as Record<string, unknown>,
+    consent: { mode: 'none' } as Record<string, unknown>,
+    hosted: { consent: { adapter: 'none', config: {} }, chat: null, customOrigins: {} } as Record<string, unknown>,
+    selfKey: 'key_self',
+    selfPrograms: null as string[] | null,
+  };
   const calls: Array<{ method: string; path: string; body: Record<string, unknown> | undefined; headers: Record<string, string> }> = [];
   let n = 0;
   const id = (p: string) => `${p}_${++n}`;
@@ -34,8 +48,10 @@ function fakeAccount() {
       const settings = row.settings as Record<string, unknown>;
       if (destinationUrl) settings.widget = { destinationUrl };
       if (selfReferralPolicy) settings.selfReferralPolicy = selfReferralPolicy;
-      if (row.riskPolicy) settings.riskPolicy = row.riskPolicy; // GET returns it under settings
-      delete row.riskPolicy;
+      for (const k of ['riskPolicy', 'widget']) {
+        if (row[k]) settings[k] = row[k]; // GET returns these under settings
+        delete row[k];
+      }
       return ok(row);
     }
     if (route === 'GET /v1/commission-rules') return ok(db.rules.filter((r) => r.programId === u.searchParams.get('programId')).reverse());
@@ -86,6 +102,42 @@ function fakeAccount() {
       return ok({ ...row, secret: 'whsec_AUTHSECRET' });
     }
     if ((m = route.match(/^PATCH \/v1\/auth\/connections\/(\w+)$/))) return ok(Object.assign(db.auth.find((c) => c.id === m![1])!, body));
+    if (route === 'GET /v1/cli/topics') return ok({ topics: ['referral.created', 'referral.voided', 'commission.earned', 'commission.reversed', 'commission.settled', 'payout.sent'] });
+    if (route === 'GET /v1/me') return ok({ apiKey: { id: db.selfKey, programIds: db.selfPrograms } });
+    if ((m = route.match(/^DELETE \/v1\/(webhook-endpoints|billing\/connections|auth\/connections)\/(\w+)$/))) {
+      const table = { 'webhook-endpoints': db.hooks, 'billing/connections': db.conns, 'auth/connections': db.auth }[m[1]!]!;
+      table.splice(table.findIndex((r) => r.id === m![2]), 1);
+      return ok({ ok: true });
+    }
+    if ((m = route.match(/^DELETE \/v1\/api-keys\/(\w+)$/))) {
+      db.keys.find((k) => k.id === m![1])!.revokedAt = '2026-11-11T00:00:00Z';
+      return ok({ ok: true });
+    }
+    if (route === 'GET /v1/payout-connections') return ok(db.payouts);
+    if ((m = route.match(/^(PUT|DELETE) \/v1\/payout-connections\/(\w+)$/))) {
+      db.payouts = db.payouts.filter((p) => p.provider !== m![2]);
+      if (m[1] === 'PUT') db.payouts.push({ id: m[2]!, provider: m[2]!, env: (body!.env as string) ?? 'live', status: 'active' });
+      return ok({ provider: m[2] });
+    }
+    if (route === 'GET /v1/email/settings') return ok(db.email);
+    if (route === 'PUT /v1/email/settings') {
+      const { apiKey, ...rest } = body!;
+      Object.assign(db.email, rest, apiKey ? { hasApiKey: true } : {});
+      return ok(db.email);
+    }
+    if (route === 'GET /v1/org/tracking-consent') return ok({ ...db.consent, configured: true, adapters: [] });
+    if (route === 'PUT /v1/org/tracking-consent') return ok((db.consent = body!));
+    if (route === 'GET /v1/org/hosted-pages') return ok(db.hosted);
+    if (route === 'PUT /v1/org/hosted-pages') {
+      const chat = body!.chat as Record<string, unknown> | null;
+      db.hosted = { ...body!, chat: chat ? { adapter: chat.adapter, config: chat.config, hasIdentitySecret: Boolean(chat.identitySecret) } : null };
+      return ok(db.hosted);
+    }
+    if ((m = route.match(/^PUT \/v1\/programs\/(\w+)\/referee-reward$/))) {
+      const { enabled, ...reward } = body!;
+      (db.programs.find((p) => p.id === m![1])!.settings as Record<string, unknown>).refereeReward = enabled === false ? null : { kind: 'store_credit', ...reward, currency: String(reward.currency ?? 'usd').toLowerCase() };
+      return ok({});
+    }
     return new Response(JSON.stringify({ error: { code: 'not_found', message: route } }), { status: 404 });
   }) as typeof fetch;
   return { fetchFn, calls, db };
@@ -125,7 +177,7 @@ programs:
       secretKeyEnv: STRIPE_CREDIT_KEY
 webhooks:
   - url: https://example.com/hooks/referalli
-    topics: [commission.created, referral.created]
+    topics: [commission.earned, referral.created]
     programs: [pro]
 apiKeys:
   - name: ci
@@ -203,14 +255,14 @@ describe('referalli plan / apply', () => {
     const edited = writeConfig(
       YAML.replace('cookieWindowDays: 30', 'cookieWindowDays: 45')
         .replace('holdDays: 14', 'holdDays: 7')
-        .replace('topics: [commission.created, referral.created]', 'topics: [commission.created]\n    status: paused'),
+        .replace('topics: [commission.earned, referral.created]', 'topics: [commission.earned]\n    status: paused'),
     );
     const plan = harness(acct, ENV);
     expect(await runCli(['plan', edited, '--check'], plan.io)).toBe(2);
     const text = plan.text();
     expect(text).toContain('~ update program "pro"\n    cookieWindowDays: 30 → 45');
     expect(text).toContain('~ update commissionRule "pro" (v1)\n    holdDays: 14 → 7');
-    expect(text).toContain('    topics: ["commission.created","referral.created"] → ["commission.created"]');
+    expect(text).toContain('    topics: ["commission.earned","referral.created"] → ["commission.earned"]');
     expect(text).toContain('    status: "active" → "paused"');
     expect(text).toContain('= unchanged stripeCredits "pro"'); // the program's own key is set: never re-sent
     expect(text).toContain('= unchanged apiKey "ci"');
@@ -481,5 +533,140 @@ authConnections:
       expect(await runCli(['plan', writeConfig('authConnections:\n  - { provider: clerk, program: pro }\n  - { provider: clerk, program: pro }\n')], t.io)).toBe(1);
       expect(t.text()).toContain('listed twice');
     });
+  });
+
+  describe('webhooks by id, topics, managedBy and --prune (R-10, R-19, R-20)', () => {
+    const hook = (over: Record<string, unknown> = {}) => ({ id: 'whe_9', url: 'https://old.test/h', topics: ['referral.created'], programIds: null, status: 'active', alertContacts: [], ...over });
+
+    it('an id keeps the endpoint (and its secret) when the url moves', async () => {
+      const acct = fakeAccount();
+      acct.db.hooks.push(hook());
+      const file = writeConfig('webhooks:\n  - id: whe_9\n    url: https://new.test/h\n    topics: [referral.created]\n');
+      const t = harness(acct);
+      expect(await runCli(['plan', file], t.io)).toBe(0);
+      expect(t.text()).toContain('~ update webhook url: https://old.test/h → https://new.test/h');
+      expect(t.text()).toContain('    url: "https://old.test/h" → "https://new.test/h"');
+      expect(await runCli(['apply', file], harness(acct).io)).toBe(0);
+      expect(acct.calls.filter((c) => c.method !== 'GET')).toEqual([expect.objectContaining({ method: 'PATCH', path: '/v1/webhook-endpoints/whe_9', body: { url: 'https://new.test/h' } })]);
+      expect(acct.db.hooks).toHaveLength(1);
+      const again = harness(acct);
+      expect(await runCli(['plan', file, '--check'], again.io)).toBe(0);
+
+      const gone = harness(acct);
+      expect(await runCli(['plan', writeConfig('webhooks:\n  - id: whe_404\n    url: https://new.test/h\n')], gone.io)).toBe(1);
+      expect(gone.text()).toContain('no such endpoint');
+    });
+
+    it('an unknown topic is refused with a suggestion; * and prefix.* pass', async () => {
+      const t = harness(fakeAccount());
+      expect(await runCli(['plan', writeConfig('webhooks:\n  - url: https://x.test/h\n    topics: [commission.created]\n')], t.io)).toBe(1);
+      expect(t.text()).toContain('unknown topic "commission.created" (did you mean commission.');
+      const ok = harness(fakeAccount());
+      expect(await runCli(['plan', writeConfig('webhooks:\n  - url: https://x.test/h\n    topics: ["*", "referral.*"]\n')], ok.io)).toBe(0);
+      const prefix = harness(fakeAccount());
+      expect(await runCli(['plan', writeConfig('webhooks:\n  - url: https://x.test/h\n    topics: [nothing.*]\n')], prefix.io)).toBe(1);
+    });
+
+    it("an Atlas-managed endpoint: its topics aren't drift, it needn't be in the file, and --prune never deletes it", async () => {
+      const acct = fakeAccount();
+      acct.db.hooks.push(hook({ id: 'whe_atlas', url: 'https://api.atlasauth.net/v1/referrals/inbound/i', topics: ['referral.*'], managedBy: 'atlas' }));
+      const declared = harness(acct);
+      expect(await runCli(['plan', writeConfig('webhooks:\n  - url: https://api.atlasauth.net/v1/referrals/inbound/i\n    managedBy: atlas\n'), '--check'], declared.io)).toBe(0);
+      expect(declared.text()).toContain('= unchanged webhook https://api.atlasauth.net/v1/referrals/inbound/i');
+      const omitted = harness(acct);
+      expect(await runCli(['plan', writeConfig('webhooks: []\n'), '--prune', '--check'], omitted.io)).toBe(0);
+      expect(omitted.text()).not.toContain('delete');
+    });
+
+    it('--prune deletes what the file dropped, last, but never the calling key or its twin, nor anything outside the scope', async () => {
+      const acct = fakeAccount();
+      acct.db.programs.push({ id: 'prg_a', slug: 'pro', status: 'active', settings: {} }, { id: 'prg_b', slug: 'other', status: 'active', settings: {} });
+      acct.db.hooks.push(hook({ id: 'whe_gone', url: 'https://gone.test/h', programIds: ['prg_a'] }), hook({ id: 'whe_other', url: 'https://other.test/h', programIds: ['prg_b'] }));
+      acct.db.keys.push(
+        { id: 'key_self', name: 'deploy', owner: null, revokedAt: null, pairId: 'kp_1', livemode: true },
+        { id: 'key_twin', name: 'deploy', owner: null, revokedAt: null, pairId: 'kp_1', livemode: false },
+        { id: 'key_old', name: 'old', owner: null, revokedAt: null, programIds: ['prg_a'], livemode: true },
+        { id: 'key_wide', name: 'wide', owner: null, revokedAt: null, programIds: null, livemode: true },
+      );
+      const file = writeConfig('programs:\n  - slug: pro\nwebhooks:\n  - url: https://keep.test/h\n    programs: [pro]\napiKeys: []\n');
+
+      const plain = harness(acct);
+      expect(await runCli(['plan', file], plain.io)).toBe(0);
+      expect(plain.text()).not.toContain('delete');
+
+      const t = harness(acct);
+      expect(await runCli(['plan', file, '--prune'], t.io)).toBe(0);
+      expect(t.text()).toContain('- delete webhook https://gone.test/h (whe_gone)');
+      expect(t.text()).toContain('- delete apiKey "old" live (key_old, revoked)');
+      expect(t.text()).not.toContain('other.test'); // another program's: outside the file's programs
+      expect(t.text()).not.toContain('key_wide'); // org-wide: not wholly inside the scope
+      expect(t.text()).not.toContain('key_self');
+      expect(t.text()).not.toContain('key_twin');
+      expect(t.text()).toContain('Plan: 1 to create, 0 to update, 2 to delete, 1 unchanged.');
+
+      expect(await runCli(['apply', file, '--prune'], harness(acct).io)).toBe(0);
+      const writes = acct.calls.filter((c) => c.method !== 'GET').map((c) => `${c.method} ${c.path}`);
+      expect(writes.slice(-3)).toEqual(['POST /v1/webhook-endpoints', 'DELETE /v1/webhook-endpoints/whe_gone', 'DELETE /v1/api-keys/key_old']);
+      expect(acct.db.hooks.map((h) => h.id)).toContain('whe_other');
+    });
+  });
+
+  it('R-11: payouts, email, consent, hosted pages, referee reward, widget, brand and tokenVerification; secrets by env name; then unchanged', async () => {
+    const acct = fakeAccount();
+    const FILE = `
+programs:
+  - slug: pro
+    termsUrl: https://example.com/terms
+    brand: { name: FormFlow, logoUrl: https://example.com/logo.png }
+    widget: { autoEnroll: true, destinationUrl: https://example.com/signup }
+    refereeReward: { kind: store_credit, amountMinor: 500, currency: USD }
+authConnections:
+  - provider: atlas
+    instanceId: inst_1
+    program: pro
+    tokenVerification: { preset: atlas, tenant: t.atlasauth.net }
+payouts:
+  - provider: stripe
+    credentialEnv: { secretKey: PAYOUT_KEY }
+email:
+  provider: resend
+  apiKeyEnv: RESEND_KEY
+  fromAddress: partners@example.com
+trackingConsent: { mode: cookiemunch }
+hostedPages:
+  consent: { adapter: cookiemunch, config: { siteId: s1 } }
+`;
+    const env = { PAYOUT_KEY: 'sk_live_PAYOUTSECRET', RESEND_KEY: 're_EMAILSECRET' };
+    const file = writeConfig(FILE);
+    const missing = harness(acct);
+    expect(await runCli(['plan', file], missing.io)).toBe(1);
+    expect(missing.text()).toContain('PAYOUT_KEY is not set');
+
+    const t = harness(acct, env);
+    expect(await runCli(['apply', file], t.io)).toBe(0);
+    expect(t.text()).toContain('    secretKey: "(from $PAYOUT_KEY)"');
+    expect(t.text()).toContain('    apiKey: "(none)" → "(from $RESEND_KEY)"');
+    for (const secret of Object.values(env)) expect(t.text()).not.toContain(secret);
+    const call = (method: string, path: string) => acct.calls.find((c) => c.method === method && c.path === path)!;
+    expect(call('POST', '/v1/programs').body).toMatchObject({ termsUrl: 'https://example.com/terms', brand: { name: 'FormFlow' }, widget: { autoEnroll: true } });
+    expect(call('PUT', '/v1/payout-connections/stripe').body).toEqual({ secretKey: 'sk_live_PAYOUTSECRET' });
+    expect(call('PUT', '/v1/email/settings').body).toEqual({ provider: 'resend', fromAddress: 'partners@example.com', apiKey: 're_EMAILSECRET' });
+    expect(call('PUT', '/v1/org/tracking-consent').body).toEqual({ mode: 'cookiemunch' });
+    expect(call('PUT', '/v1/org/hosted-pages').body).toEqual({ consent: { adapter: 'cookiemunch', config: { siteId: 's1' } }, chat: null, customOrigins: {} });
+    expect(call('POST', '/v1/auth/connections').body).toMatchObject({ tokenVerification: { preset: 'atlas', tenant: 't.atlasauth.net' } });
+    expect(acct.calls.find((c) => c.method === 'PUT' && c.path.endsWith('/referee-reward'))!.body).toEqual({ kind: 'store_credit', amountMinor: 500, currency: 'USD' });
+
+    const again = harness(acct, env);
+    expect(await runCli(['plan', file, '--check'], again.io)).toBe(0);
+    expect(again.text()).toContain('= unchanged refereeReward "pro"');
+    expect(again.text()).toContain('= unchanged payout "stripe"');
+    expect(again.text()).toContain('= unchanged email settings');
+
+    const off = harness(acct, env);
+    expect(await runCli(['plan', writeConfig(FILE.replace(/refereeReward: .*\n/, 'refereeReward: null\n')), '--check'], off.io)).toBe(2);
+    expect(off.text()).toContain('~ update refereeReward "pro"');
+    const bad = harness(acct, env);
+    expect(await runCli(['plan', writeConfig('email:\n  apiKey: re_x\n')], bad.io)).toBe(1);
+    expect(bad.text()).toContain('secrets never go in the file');
   });
 });

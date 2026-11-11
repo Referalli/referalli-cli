@@ -19,13 +19,17 @@ export const configPath = (env: NodeJS.ProcessEnv = process.env) => join(configD
 
 const READ_ENV = ['REFERALLI_API_KEY', 'REFERALLI_API_URL', 'REFERALLI_CONFIG_DIR', 'REFERALLI_TRACKING_TOKEN', 'NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN'];
 const oldName = (name: string) => name.replace('REFERALLI_', 'REFERALLY_');
+/** The pre-rename env names Referalli itself reads (the CLI's, above); no other package read a REFERALLY_* name. */
+export const LEGACY_ENV: readonly string[] = READ_ENV.map(oldName);
+/** When the CLI stops reading them (docs: Renamed from Referally). */
+export const LEGACY_ENV_REMOVAL = '2027-03-31';
 
 /** The env with pre-rename names filled in under the new ones (a new name wins), and which were used. */
 export function withLegacyEnv(env: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; notice: string | null } {
   const used = READ_ENV.filter((name) => !env[name] && env[oldName(name)]);
   return {
     env: { ...env, ...Object.fromEntries(used.map((name) => [name, env[oldName(name)]])) },
-    notice: used.length ? `Notice: read ${used.map((name) => `${oldName(name)} as ${name}`).join(', ')}; rename it (no removal date set).` : null,
+    notice: used.length ? `Notice: read ${used.map((name) => `${oldName(name)} as ${name}`).join(', ')}; rename it (read until ${LEGACY_ENV_REMOVAL}).` : null,
   };
 }
 

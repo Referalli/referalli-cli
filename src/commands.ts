@@ -503,14 +503,15 @@ const SECRET_FIELDS = ['webhookSecret', 'secret', 'key'] as const;
 
 // --- plan / apply ------------------------------------------------------------------
 
-/** `referalli plan <file>` / `referalli apply <file> [--plan] [--check] [--secret-file PATH]`. */
+/** `referalli plan <file> [--prune]` / `referalli apply <file> [--plan] [--check] [--prune] [--secret-file PATH]`. */
 export async function apply(io: Io, file: string | undefined, flags: Flags, planOnly: boolean): Promise<number> {
-  if (!file) throw new CliError(planOnly ? 'Usage: referalli plan <referalli.yaml> [--check]' : 'Usage: referalli apply <referalli.yaml> [--plan] [--check] [--secret-file PATH]');
+  if (!file) throw new CliError(planOnly ? 'Usage: referalli plan <referalli.yaml> [--check] [--prune]' : 'Usage: referalli apply <referalli.yaml> [--plan] [--check] [--prune] [--secret-file PATH]');
   const { client } = signedIn(io);
   try {
     return await runApply(io, client, file, {
       apply: !planOnly && !flags.plan,
       check: flags.check === true,
+      prune: flags.prune === true,
       secretFile: typeof flags['secret-file'] === 'string' ? flags['secret-file'] : undefined,
     });
   } catch (err) {
@@ -523,7 +524,7 @@ export async function apply(io: Io, file: string | undefined, flags: Flags, plan
 /** `referalli doctor [--program <id>] [--json]`, or `--scan <dir> [--strict]`, which needs no key. */
 export async function doctor(io: Io, flags: Flags): Promise<number> {
   if (flags.strict && typeof flags.scan !== 'string') throw new CliError('--strict goes with --scan <dir>');
-  if (flags.e2e && typeof flags.program !== 'string') throw new CliError('--e2e tests one program: add --program <id>');
+  if (flags.e2e && typeof flags.program !== 'string') throw new CliError('--e2e tests one program: add --program <id> (or set REFERALLI_PROGRAM_ID)');
   if (typeof flags.scan !== 'string') return runDoctor(io, signedIn(io).client, flags);
   try {
     return runScan((l) => io.out(l), (l) => io.err(l), flags.scan, { strict: flags.strict === true, json: flags.json === true });
@@ -563,6 +564,28 @@ export async function partners(io: Io, sub: string | undefined, flags: Flags): P
   if (flags.json) io.out(JSON.stringify(rows, null, 2));
   else for (const r of rows) io.out([r.partnerId, r.externalRef ?? '-', r.email, r.status ?? '-', `enrolled ${r.enrolledAt}`].join('  '));
   io.err(`${rows.length} enrolled partner(s).`);
+  return 0;
+}
+
+// --- billing -----------------------------------------------------------------------
+
+const BILLING_USAGE = 'Usage: referalli billing owner set <accountRef> <customerRef>';
+
+/** `billing owner set <accountRef> <customerRef>`: the user whose referral an organization's payments earn for. */
+export async function billing(io: Io, args: string[]): Promise<number> {
+  const [what, verb, accountRef, ownerCustomerRef, ...extra] = args;
+  if (what !== 'owner' || verb !== 'set' || !accountRef || !ownerCustomerRef || extra.length > 0) throw new CliError(BILLING_USAGE);
+  const { client } = signedIn(io);
+  const res = await client.request<{ changed: boolean; previousOwnerCustomerRef: string | null; relinked?: number; reprocessedPayments?: number }>(
+    'PUT',
+    `/v1/billing/accounts/${encodeURIComponent(accountRef)}/owner`,
+    { ownerCustomerRef },
+  );
+  if (!res.changed) io.out(`${accountRef} is already owned by ${ownerCustomerRef}: nothing changed.`);
+  else {
+    const was = res.previousOwnerCustomerRef ? ` (was ${res.previousOwnerCustomerRef})` : '';
+    io.out(`${accountRef} is now owned by ${ownerCustomerRef}${was}: ${res.relinked ?? 0} customer(s) relinked, ${res.reprocessedPayments ?? 0} earlier payment(s) reprocessed.`);
+  }
   return 0;
 }
 

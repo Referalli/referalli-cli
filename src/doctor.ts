@@ -1,10 +1,12 @@
+import { listAll } from './apply.js';
 import { ApiError, type Client } from './client.js';
 import type { Flags, Io } from './commands.js';
 
 /** One line of `referalli doctor`. */
 export interface Check {
   id: string;
-  status: 'ok' | 'warn' | 'fail';
+  /** `info`: worth knowing, never a problem (doctor --scan: a REFERALLY_* name of the app's own). */
+  status: 'ok' | 'info' | 'warn' | 'fail';
   message: string;
   fix?: string;
 }
@@ -25,21 +27,22 @@ async function guard(id: string, fix: string | undefined, fn: () => Promise<Chec
 }
 
 interface Me {
-  apiKey: { name: string; scopes: string[]; livemode: boolean; expiresAt: string | null; programIds: string[] | null } | null;
+  apiKey: { id?: string; name: string; scopes: string[]; livemode: boolean; expiresAt: string | null; programIds: string[] | null } | null;
 }
 
-async function keyCheck(client: Client, now: Date): Promise<Check[]> {
+/** The key's checks, and the key itself for scoping the rest (null when it couldn't be read). */
+async function keyCheck(client: Client, now: Date): Promise<{ checks: Check[]; key: Me['apiKey'] }> {
   let me: Me;
   try {
     me = await client.request<Me>('GET', '/v1/me');
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) {
-      return [{ id: 'key', status: 'fail', message: `the API key was refused: ${err.message}`, fix: 'referalli login' }];
+      return { checks: [{ id: 'key', status: 'fail', message: `the API key was refused: ${err.message}`, fix: 'referalli login' }], key: null };
     }
-    throw err;
+    return { checks: [{ id: 'key', status: 'warn', message: `couldn't check: ${reason(err)}`, fix: 'referalli login' }], key: null };
   }
   const k = me.apiKey;
-  if (!k) return [{ id: 'key', status: 'warn', message: 'signed in without an API key; key checks skipped', fix: 'referalli login' }];
+  if (!k) return { checks: [{ id: 'key', status: 'warn', message: 'signed in without an API key; key checks skipped', fix: 'referalli login' }], key: null };
   const out: Check[] = [
     { id: 'key', status: 'ok', message: `${k.livemode ? 'live' : 'test'} key "${k.name}", scopes: ${k.scopes.join(', ') || 'none'}` },
   ];
@@ -47,22 +50,33 @@ async function keyCheck(client: Client, now: Date): Promise<Check[]> {
     out.push({ id: 'key.expiry', status: 'warn', message: `the key expires ${k.expiresAt}`, fix: 'referalli keys create --name NAME (then referalli login --key …)' });
   }
   if (k.programIds) {
-    out.push({
-      id: 'key.programs',
-      status: 'warn',
-      message: `the key is limited to programs ${k.programIds.join(', ')}: webhook and billing checks see only these programs, and org-wide checks are skipped (listed below)`,
-      fix: 'run doctor with an org-wide key to check everything',
-    });
+    // R-08: a scoped key is normal (one org, several products): the checks below cover its programs only.
+    out.push({ id: 'key.programs', status: 'ok', message: `the key is limited to programs ${k.programIds.join(', ')}: the checks below cover only these (org-wide ones it can't read say so)` });
   }
-  return out;
+  return { checks: out, key: k };
 }
 
-interface Program { id: string; name: string; status: string }
+interface Program {
+  id: string;
+  name: string;
+  status: string;
+  publicHandle?: string | null;
+  publicPage?: { autoApprove?: boolean };
+  settings?: { settlement?: string; widget?: { autoEnroll?: boolean; destinationUrl?: string | null } };
+}
 
-async function termsChecks(client: Client, programId: string | undefined): Promise<Check[]> {
-  const programs = programId
-    ? [await client.request<Program>('GET', `/v1/programs/${encodeURIComponent(programId)}`)]
+/** The programs doctor checks: the scope's (each fetched), else every active one. */
+async function loadPrograms(client: Client, scope: string[] | null): Promise<Program[]> {
+  return scope
+    ? Promise.all(scope.map((id) => client.request<Program>('GET', `/v1/programs/${encodeURIComponent(id)}`)))
     : rows(await client.request<Program[] | { data: Program[] }>('GET', '/v1/programs')).filter((p) => p.status === 'active');
+}
+
+/** Outside the scope: limited to programs, none of them in it. Org-wide (null) resources concern every program. */
+const outside = (scope: string[] | null, programIds: string[] | null | undefined) =>
+  Boolean(scope && programIds && programIds.length > 0 && !programIds.some((id) => scope.includes(id)));
+
+async function termsChecks(client: Client, programs: Program[]): Promise<Check[]> {
   if (programs.length === 0) return [{ id: 'programs', status: 'warn', message: 'no active programs', fix: '/programs' }];
   return Promise.all(
     programs.map((p) =>
@@ -79,10 +93,10 @@ async function termsChecks(client: Client, programId: string | undefined): Promi
   ).then((all) => all.flat());
 }
 
-interface Endpoint { id: string; url: string; status: string; health: string; consecutiveFailures: number; lastFailure: { statusCode: number | null; error: string | null } | null }
+interface Endpoint { id: string; url: string; status: string; health: string; consecutiveFailures: number; lastFailure: { statusCode: number | null; error: string | null } | null; programIds?: string[] | null }
 
-async function webhookChecks(client: Client): Promise<Check[]> {
-  const endpoints = rows(await client.request<Endpoint[] | { data: Endpoint[] }>('GET', '/v1/webhook-endpoints'));
+async function webhookChecks(client: Client, scope: string[] | null): Promise<Check[]> {
+  const endpoints = rows(await client.request<Endpoint[] | { data: Endpoint[] }>('GET', '/v1/webhook-endpoints')).filter((e) => !outside(scope, e.programIds));
   if (endpoints.length === 0) return [{ id: 'webhooks', status: 'ok', message: 'no webhook endpoints' }];
   return endpoints.map((e): Check => {
     const id = `webhook.${e.id}`;
@@ -94,10 +108,10 @@ async function webhookChecks(client: Client): Promise<Check[]> {
   });
 }
 
-interface BillingConnection { id: string; provider: string; name: string; status: string }
+interface BillingConnection { id: string; provider: string; name: string; status: string; programIds?: string[] | null }
 
-async function billingChecks(client: Client): Promise<Check[]> {
-  const conns = rows(await client.request<BillingConnection[] | { data: BillingConnection[] }>('GET', '/v1/billing/connections'));
+async function billingChecks(client: Client, scope: string[] | null): Promise<Check[]> {
+  const conns = rows(await client.request<BillingConnection[] | { data: BillingConnection[] }>('GET', '/v1/billing/connections')).filter((c) => !outside(scope, c.programIds));
   if (conns.length === 0) {
     return [{ id: 'billing', status: 'warn', message: "no billing connection: payments won't earn commission", fix: 'POST /v1/billing/connections' }];
   }
@@ -112,11 +126,27 @@ async function billingChecks(client: Client): Promise<Check[]> {
   });
 }
 
-interface AuthConnection { id: string; provider: string; name: string | null; status: string; tokenVerification: unknown; allowedOrigins: string[]; lastSignupAt?: string | null; lastError?: { at: string; code: string; message: string } | null }
+interface AuthConnection {
+  id: string;
+  provider: string;
+  programId?: string;
+  name: string | null;
+  status: string;
+  tokenVerification: unknown;
+  allowedOrigins: string[];
+  lastSignupAt?: string | null;
+  /** R-30: when Referalli received the last sign-up (lastSignupAt is the sign-up's own time). */
+  lastSignupReceivedAt?: string | null;
+  lastError?: { at: string; code: string; message: string } | null;
+}
 
-async function authChecks(client: Client, now: Date): Promise<Check[]> {
-  const conns = rows(await client.request<AuthConnection[] | { data: AuthConnection[] }>('GET', '/v1/auth/connections'));
+async function authChecks(client: Client, now: Date, programs: Program[], scope: string[] | null): Promise<Check[]> {
+  const conns = rows(await client.request<AuthConnection[] | { data: AuthConnection[] }>('GET', '/v1/auth/connections')).filter(
+    (c) => !scope || !c.programId || scope.includes(c.programId),
+  );
   const out = conns.map((c): Check => {
+    // Receipt time when the API has it: a late-filed sign-up must not look like a fresh one (R-30).
+    const lastSignupAt = c.lastSignupReceivedAt ?? c.lastSignupAt;
     const id = `auth.${c.id}`;
     const label = `${c.provider} auth connection${c.name ? ` "${c.name}"` : ''}`;
     if (c.status === 'paused') return { id, status: 'warn', message: `${label} is paused`, fix: `PATCH /v1/auth/connections/${c.id} {"status":"active"}` };
@@ -124,19 +154,32 @@ async function authChecks(client: Client, now: Date): Promise<Check[]> {
       return { id, status: 'warn', message: `${label} verifies tokens but has no allowedOrigins: the widget session refuses browsers`, fix: `PATCH /v1/auth/connections/${c.id} {"allowedOrigins":["https://your.app"]}` };
     }
     // A refusal newer than the last sign-up: the platform is calling, and its calls are failing.
-    if (c.lastError && (!c.lastSignupAt || new Date(c.lastError.at) > new Date(c.lastSignupAt))) {
+    if (c.lastError && (!lastSignupAt || new Date(c.lastError.at) > new Date(lastSignupAt))) {
       return { id, status: 'fail', message: `${label} refused its last call (${c.lastError.at}): ${c.lastError.code}: ${c.lastError.message}`, fix: `fix the caller's request body, then retry its failed calls (Atlas: POST /v1/instance/referrals/calls/retry_failed)` };
     }
     // Protocol connections (Atlas, custom) can't be pinged with an API key: when it last filed a sign-up says it's wired.
     // undefined: an API from before lastSignupAt, nothing to say.
-    if (c.lastSignupAt === null) {
+    if (lastSignupAt === null) {
       return { id, status: 'warn', message: `${label} is ${c.status} but has never filed a sign-up`, fix: `sign up a user in your app (test sign-ups don't count) and check the platform calls connection ${c.id}` };
     }
-    if (c.lastSignupAt && now.getTime() - new Date(c.lastSignupAt).getTime() > 30 * DAY) {
-      return { id, status: 'warn', message: `${label} is ${c.status}; no sign-up since ${c.lastSignupAt}`, fix: `check the platform still calls connection ${c.id}` };
+    if (lastSignupAt && now.getTime() - new Date(lastSignupAt).getTime() > 30 * DAY) {
+      return { id, status: 'warn', message: `${label} is ${c.status}; no sign-up since ${lastSignupAt}`, fix: `check the platform still calls connection ${c.id}` };
     }
-    return { id, status: 'ok', message: `${label} is ${c.status}${c.lastSignupAt ? `; last sign-up ${c.lastSignupAt}` : ''}` };
+    return { id, status: 'ok', message: `${label} is ${c.status}${lastSignupAt ? `; last sign-up ${lastSignupAt}` : ''}` };
   });
+  // R-06: the Atlas referral panel mints widget tokens, which needs the program's widget set up.
+  for (const c of conns.filter((x) => x.provider === 'atlas' && x.status === 'active')) {
+    const p = programs.find((x) => x.id === c.programId);
+    const w = p?.settings?.widget;
+    if (p && !w?.autoEnroll && !w?.destinationUrl) {
+      out.push({
+        id: `widget.${p.id}`,
+        status: 'warn',
+        message: `program "${p.name}" has an Atlas connection but its widget isn't configured: the referral panel can't enroll users or build their links`,
+        fix: `PATCH /v1/programs/${p.id} {"widget":{"autoEnroll":true,"destinationUrl":"https://your.app/signup"}}`,
+      });
+    }
+  }
   if (!conns.some((c) => c.provider === 'atlas')) {
     const other = conns.find((c) => c.status === 'active');
     out.push(
@@ -194,7 +237,86 @@ async function trackingCheck(client: Client, env: NodeJS.ProcessEnv): Promise<Ch
   return [...out, ...tokens];
 }
 
-const MARK = { ok: '✓', warn: '⚠', fail: '✗' } as const;
+interface HealthCheck { id: string; ok: boolean; detail: string; fix?: string; docs?: string; severity?: string }
+
+/**
+ * Every GET /v1/integration-health check, as `health.<id>`. A failed one is ✗ when the API marks it
+ * `severity: "error"` (or critical), else ⚠. Scoped, never ✗: it may be about another program.
+ */
+async function healthChecks(client: Client, scope: string[] | null): Promise<Check[]> {
+  const res = await client.request<{ checks: HealthCheck[] }>('GET', '/v1/integration-health');
+  return res.checks.map((h): Check => {
+    const id = `health.${h.id}`;
+    if (h.ok) return { id, status: 'ok', message: h.detail };
+    const severe = !scope && (h.severity === 'error' || h.severity === 'critical');
+    const fix = [h.fix, h.docs].filter(Boolean).join(' ');
+    return { id, status: severe ? 'fail' : 'warn', message: h.detail, ...(fix ? { fix } : {}) };
+  });
+}
+
+/** A program settling by payout with no payout connection: partners can only be paid by hand. Test mode pays through the test rail. */
+async function payoutChecks(client: Client, programs: Program[], live: boolean): Promise<Check[]> {
+  const paying = programs.filter((p) => p.status === 'active' && (p.settings?.settlement ?? 'payout') === 'payout');
+  if (paying.length === 0) return [];
+  if (!live) return [{ id: 'payouts.connection', status: 'ok', message: 'test mode pays every method through the test rail' }];
+  type Conn = { provider: string; status: string };
+  const active = rows(await client.request<Conn[] | { data: Conn[] }>('GET', '/v1/payout-connections')).filter((c) => c.status === 'active');
+  if (active.length) return [{ id: 'payouts.connection', status: 'ok', message: `payout connection: ${active.map((c) => c.provider).join(', ')}` }];
+  const names = paying.map((p) => `"${p.name}"`).join(', ');
+  return [{ id: 'payouts.connection', status: 'warn', message: `no payout connection while ${names} settle by payout: partners can only be paid by hand`, fix: 'PUT /v1/payout-connections/{provider} (Settings → Payouts), or settlement: merchant_credit' }];
+}
+
+/** Partners wait for approval (so they must hear back) but no email provider is set: nothing is sent. */
+async function emailChecks(client: Client, programs: Program[]): Promise<Check[]> {
+  const reviewing = programs.filter((p) => p.publicPage?.autoApprove === false);
+  if (reviewing.length === 0) return [];
+  const s = await client.request<{ provider: string | null; hasApiKey?: boolean }>('GET', '/v1/email/settings');
+  if (s.provider && s.hasApiKey !== false) return [{ id: 'email.provider', status: 'ok', message: `email provider: ${s.provider}` }];
+  const names = reviewing.map((p) => `"${p.name}"`).join(', ');
+  return [{ id: 'email.provider', status: 'warn', message: `no email provider while ${names} approve partners by hand: partners get no emails`, fix: 'PUT /v1/email/settings {"provider":"…","apiKey":"…","fromAddress":"…"} (bring your own key)' }];
+}
+
+/** Approved commissions still unpaid after 30 days: a payout run is overdue (or partners have no payout method). */
+async function unpaidChecks(client: Client, programs: Program[], now: Date): Promise<Check[]> {
+  type Ev = { id: string; relatedCommissionId: string | null; ts: string };
+  const headers = { 'referalli-version': '2026-11-01' }; // the paged list, not a pinned version's capped array
+  return Promise.all(
+    programs.map(async (p): Promise<Check> => {
+      const q = (type: string) => listAll<Ev>(client, `/v1/commissions?programId=${encodeURIComponent(p.id)}&type=${type}`, headers);
+      const [approved, paid, reversed] = await Promise.all([q('approved'), q('paid'), q('reversed')]);
+      const settled = new Set([...paid, ...reversed].map((e) => e.relatedCommissionId));
+      const old = approved.filter((e) => !settled.has(e.relatedCommissionId) && now.getTime() - new Date(e.ts).getTime() > 30 * DAY);
+      const id = `commissions.${p.id}.unpaid`;
+      return old.length
+        ? { id, status: 'warn', message: `program "${p.name}": ${old.length} commission(s) approved over 30 days ago are still unpaid`, fix: 'run payouts (Payouts → Run), and check those partners have a payout method' }
+        : { id, status: 'ok', message: `program "${p.name}": no approved commission has waited over 30 days` };
+    }),
+  );
+}
+
+/** A program with a publicHandle: the public program and its join page answer. */
+async function joinChecks(client: Client, programs: Program[], fetchFn: typeof fetch): Promise<Check[]> {
+  return Promise.all(
+    programs
+      .filter((p) => p.publicHandle)
+      .map(async (p): Promise<Check> => {
+        const id = `join.${p.id}`;
+        const handle = encodeURIComponent(p.publicHandle!);
+        const fix = `GET /v1/public/programs/${handle}; the program must be active`;
+        try {
+          await client.request('GET', `/v1/public/programs/${handle}`);
+          const res = await fetchFn(`${client.baseUrl}/join/${handle}`, { method: 'GET', signal: AbortSignal.timeout(10_000) });
+          return res.ok
+            ? { id, status: 'ok', message: `join page /join/${p.publicHandle} answers ${res.status}` }
+            : { id, status: 'fail', message: `join page /join/${p.publicHandle} answers ${res.status}`, fix };
+        } catch (err) {
+          return { id, status: 'fail', message: `program "${p.name}" has publicHandle "${p.publicHandle}" but its public page doesn't answer: ${reason(err)}`, fix };
+        }
+      }),
+  );
+}
+
+const MARK = { ok: '✓', info: 'ℹ', warn: '⚠', fail: '✗' } as const;
 
 export function printChecks(out: (line: string) => void, checks: Check[], json: unknown): void {
   if (json) {
@@ -203,7 +325,7 @@ export function printChecks(out: (line: string) => void, checks: Check[], json: 
   }
   for (const c of checks) {
     out(`${MARK[c.status]} ${c.id}: ${c.message}`);
-    if (c.fix && c.status !== 'ok') out(`    fix: ${c.fix}`);
+    if (c.fix && c.status !== 'ok' && c.status !== 'info') out(`    fix: ${c.fix}`);
   }
 }
 
@@ -211,6 +333,9 @@ export function printChecks(out: (line: string) => void, checks: Check[], json: 
 const ORG_WIDE = {
   auth: { what: 'auth connections, Atlas sign-ups', scope: 'integrations:read or connections:read' },
   tracking: { what: 'tracking token, consent mode, configured token', scope: 'org:read' },
+  health: { what: 'GET /v1/integration-health', scope: 'integrations:read' },
+  payouts: { what: 'payout connections', scope: 'payouts:read' },
+  email: { what: 'email settings', scope: 'org:read' },
 } as const;
 
 interface E2eLink { code: string; destinationUrl: string | null }
@@ -298,11 +423,16 @@ async function e2eChecks(client: Client, programId: string, fetchFn: typeof fetc
   return out;
 }
 
-/** `referalli doctor [--program <id>] [--json]`: read-only health checks, plus `--e2e`. Exit 1 when any check fails. */
+/**
+ * `referalli doctor [--program <id>] [--json]`: read-only health checks, plus `--e2e`. Exit 1 when any check fails.
+ * Scope (R-08): --program (REFERALLI_PROGRAM_ID fills it in), else the key's programs, else every active program.
+ */
 export async function runDoctor(io: Io, client: Client, flags: Flags, now = new Date()): Promise<number> {
   const program = typeof flags.program === 'string' ? flags.program : undefined;
-  const key = await guard('key', 'referalli login', () => keyCheck(client, now));
-  const scoped = key.some((c) => c.id === 'key.programs');
+  const { checks: key, key: apiKey } = await keyCheck(client, now);
+  const scoped = Boolean(apiKey?.programIds);
+  const scope = program ? [program] : (apiKey?.programIds ?? null);
+  const fetchFn = io.fetchFn ?? fetch;
   // Asks the API rather than copying its allowlist: if it opens one of these to scoped keys, the check just runs.
   const orgWide = (id: keyof typeof ORG_WIDE, fn: () => Promise<Check[]>) =>
     guard(id, undefined, async () => {
@@ -314,16 +444,26 @@ export async function runDoctor(io: Io, client: Client, flags: Flags, now = new 
         return [{ id, status: 'warn', message: `skipped, this program-scoped key can't read it (${what})`, fix: `run doctor with an org-wide key (no programs) with ${scope}; read or full also work` }];
       }
     });
+  let programs: Program[] = [];
+  const programChecks = await guard('programs', undefined, async () => {
+    programs = await loadPrograms(client, scope);
+    return termsChecks(client, programs);
+  });
   const checks = [
     ...key,
+    ...programChecks,
     ...(
       await Promise.all([
-        guard('programs', undefined, () => termsChecks(client, program)),
-        guard('webhooks', undefined, () => webhookChecks(client)),
-        guard('billing', undefined, () => billingChecks(client)),
-        orgWide('auth', () => authChecks(client, now)),
+        guard('webhooks', undefined, () => webhookChecks(client, scope)),
+        guard('billing', undefined, () => billingChecks(client, scope)),
+        orgWide('auth', () => authChecks(client, now, programs, scope)),
         orgWide('tracking', () => trackingCheck(client, io.env)),
-        ...(flags.e2e && program ? [guard('e2e', undefined, () => e2eChecks(client, program, io.fetchFn ?? fetch, io.env))] : []),
+        orgWide('health', () => healthChecks(client, scope)),
+        orgWide('payouts', () => payoutChecks(client, programs, apiKey?.livemode !== false)),
+        orgWide('email', () => emailChecks(client, programs)),
+        guard('commissions', undefined, () => unpaidChecks(client, programs, now)),
+        guard('join', undefined, () => joinChecks(client, programs, fetchFn)),
+        ...(flags.e2e && program ? [guard('e2e', undefined, () => e2eChecks(client, program, fetchFn, io.env))] : []),
       ])
     ).flat(),
   ];

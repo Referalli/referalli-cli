@@ -1,11 +1,12 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { LEGACY_ENV, LEGACY_ENV_REMOVAL } from './config.js';
 import { printChecks, type Check } from './doctor.js';
 
 const MAX_BYTES = 1024 * 1024;
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next']);
 const LOCKFILE = /\.(lock|lockb)$|^(pnpm-lock\.yaml|package-lock\.json|npm-shrinkwrap\.json|go\.sum)$/;
-const NO_DATE = 'no removal date set';
+const REMOVAL = `removal ${LEGACY_ENV_REMOVAL}`;
 const PUBLISHED = new Set(['cli', 'express', 'mcp', 'next', 'react', 'react-native']);
 
 const packageName = (old: string) => {
@@ -14,25 +15,29 @@ const packageName = (old: string) => {
   return PUBLISHED.has(name) ? `@referalli/${name}` : 'no published replacement';
 };
 
-// Dates come from docs: Renamed from Referally. Only the cookie twin has one; the rest are "until further notice".
+// Dates come from docs: Renamed from Referally (the cookie twin goes first, the rest on one later date).
 const RULES: Array<{ re: RegExp; to: (old: string) => string; removal: string }> = [
-  { re: /\w*REFERALLY_\w*/g, to: (o) => o.replace('REFERALLY_', 'REFERALLI_'), removal: NO_DATE },
-  { re: /referally-version/gi, to: () => 'referalli-version', removal: NO_DATE },
+  { re: /\w*REFERALLY_\w*/g, to: (o) => o.replace('REFERALLY_', 'REFERALLI_'), removal: REMOVAL },
+  { re: /referally-version/gi, to: () => 'referalli-version', removal: REMOVAL },
   { re: /referally_ctx/g, to: () => 'referalli_ctx', removal: 'removal 2027-01-31' },
-  { re: /x-referally-[\w-]*/gi, to: (o) => o.toLowerCase().replace('referally', 'referalli'), removal: NO_DATE },
-  { re: /@referally\/[\w.-]*/g, to: packageName, removal: NO_DATE },
+  { re: /x-referally-[\w-]*/gi, to: (o) => o.toLowerCase().replace('referally', 'referalli'), removal: REMOVAL },
+  { re: /@referally\/[\w.-]*/g, to: packageName, removal: REMOVAL },
 ];
 
-/** One warning per old name per line. Only the name is reported, never the line: it may be a .env value. */
+/**
+ * One line per old name per line. An env name is a warning only when Referalli itself read it;
+ * any other REFERALLY_* is the app's own name (info): nothing of ours stops reading it.
+ */
 function scanFile(path: string, text: string): Check[] {
   if (!/referally/i.test(text)) return [];
   return text.split('\n').flatMap((line, i) =>
     RULES.flatMap(({ re, to, removal }) =>
-      [...new Set(line.match(re) ?? [])].map((old): Check => ({
-        id: `${path}:${i + 1}`,
-        status: 'warn',
-        message: `${old} → ${to(old)} (${removal})`,
-      })),
+      [...new Set(line.match(re) ?? [])].map((old): Check => {
+        const own = /REFERALLY_/.test(old) && !LEGACY_ENV.includes(old);
+        return own
+          ? { id: `${path}:${i + 1}`, status: 'info', message: `${old}: your own name (Referalli never read it); rename it to ${to(old)} if you like` }
+          : { id: `${path}:${i + 1}`, status: 'warn', message: `${old} → ${to(old)} (${removal})` };
+      }),
     ),
   );
 }
@@ -68,7 +73,8 @@ export function runScan(out: (line: string) => void, err: (line: string) => void
   };
   if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new Error(`${dir}: not a directory`);
   walk(dir);
+  const warnings = hits.filter((h) => h.status === 'warn').length;
   printChecks(out, hits.length ? hits : [{ id: 'names', status: 'ok', message: 'no old Referally names found' }], opts.json);
-  err(`Scanned ${files} file(s), ${hits.length} old name(s); skipped ${skipped} (over 1 MB, binary or unreadable).`);
-  return opts.strict && hits.length ? 1 : 0;
+  err(`Scanned ${files} file(s), ${warnings} old name(s) Referalli reads, ${hits.length - warnings} of your own; skipped ${skipped} (over 1 MB, binary or unreadable).`);
+  return opts.strict && warnings ? 1 : 0;
 }

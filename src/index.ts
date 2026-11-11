@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util';
 import { ApiError } from './client.js';
-import { api, apply, CliError, doctor, env, eventsTail, keys, login, listen, logout, logsTail, open, partners, trigger, whoami, type Flags, type Io } from './commands.js';
+import { api, apply, billing, CliError, doctor, env, eventsTail, keys, login, listen, logout, logsTail, open, partners, trigger, whoami, type Flags, type Io } from './commands.js';
 import { withLegacyEnv } from './config.js';
 import { VERSION } from './version.js';
 
@@ -26,12 +26,13 @@ Usage:
   referalli keys create --name NAME [--owner WHO] [--mode both|live|test] [--scopes full,…] [--programs ID,…] [--expires-days N | --expires-at ISO]
   referalli keys list [--owner WHO] [--mode live|test]
   referalli keys revoke <key id> [--pair] [--cascade]
-  referalli plan <referalli.yaml> [--check]
-  referalli apply <referalli.yaml> [--plan] [--check] [--secret-file PATH]
+  referalli plan <referalli.yaml> [--check] [--prune]
+  referalli apply <referalli.yaml> [--plan] [--check] [--prune] [--secret-file PATH]
   referalli doctor [--program <id>] [--json]
   referalli doctor --program <id> --e2e [--json]      (also tests the program from outside; see the docs)
   referalli doctor --scan <dir> [--strict] [--json]   (old Referally names in a source tree; no key needed)
   referalli partners list --program <id> [--since 7d|ISO] [--json]
+  referalli billing owner set <accountRef> <customerRef>   (the user an organization's payments earn for)
   referalli env pull [--mode live|test]   (.env lines on stdout; default: the key's mode)
 
 Environment:
@@ -39,6 +40,7 @@ Environment:
   REFERALLI_API_URL   API base URL (default: the hosted API)
   REFERALLI_CONFIG_DIR where the login is saved (default ~/.config/referalli)
   REFERALLI_TRACKING_TOKEN  doctor checks it is this mode's token (or NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN)
+  REFERALLI_PROGRAM_ID  the default for --program (doctor, partners list)
   REFERALLY_* spellings of these still work, with a notice`;
 
 /** Run one command; returns the process exit code. */
@@ -78,6 +80,7 @@ export async function runCli(argv: string[], baseIo: Io): Promise<number> {
         cascade: { type: 'boolean' },
         plan: { type: 'boolean' },
         check: { type: 'boolean' },
+        prune: { type: 'boolean' },
         json: { type: 'boolean' },
         scan: { type: 'string' },
         strict: { type: 'boolean' },
@@ -92,6 +95,8 @@ export async function runCli(argv: string[], baseIo: Io): Promise<number> {
     return 2;
   }
   const flags = parsed.values as Flags;
+  // R-08: the app's own env names its program (doctor, partners list).
+  if (flags.program === undefined && io.env.REFERALLI_PROGRAM_ID?.trim()) flags.program = io.env.REFERALLI_PROGRAM_ID.trim();
   const [command, ...rest] = parsed.positionals;
   if (flags.version) {
     io.out(VERSION);
@@ -138,6 +143,8 @@ export async function runCli(argv: string[], baseIo: Io): Promise<number> {
         return await env(io, rest[0], flags);
       case 'partners':
         return await partners(io, rest[0], flags);
+      case 'billing':
+        return await billing(io, rest);
       default:
         io.err(`Unknown command "${command}".`);
         io.err(HELP);

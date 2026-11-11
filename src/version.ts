@@ -1,2 +1,2 @@
 /** Kept in step with package.json by test/version.test.ts. */
-export const VERSION = '0.4.7';
+export const VERSION = '0.4.8';
