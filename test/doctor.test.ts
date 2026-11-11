@@ -357,6 +357,27 @@ describe('referalli doctor', () => {
       expect((await run(routes)).code).toBe(1);
     });
 
+    it('RF-1: with its own connection, org-wide connections\' health goes into the other-programs line; info stays ℹ', async () => {
+      const routes = healthy({
+        'GET /v1/billing/connections': [
+          { id: 'bcon_ff', provider: 'generic', name: 'FormFlow plans', status: 'active', programIds: ['prg_1'] },
+          { id: 'bcon_org', provider: 'generic', name: 'Other', status: 'active', programIds: null },
+        ],
+        'GET /v1/integration-health': {
+          ok: true,
+          checks: [
+            { id: 'billing.generic.bcon_ff', ok: false, detail: 'generic connection has never received an event.', severity: 'info' },
+            { id: 'billing.generic.bcon_org', ok: false, detail: 'no event in 30 days', severity: 'warning' },
+          ],
+        },
+      });
+      const { code, out } = await run(routes, ['--program', 'prg_1']);
+      expect(code).toBe(0);
+      expect(out).toContain('ℹ health.billing.generic.bcon_ff: generic connection has never received an event.');
+      expect(out).not.toContain('health.billing.generic.bcon_org');
+      expect(out).toContain('ℹ scope.other: 1 issue(s) in other programs');
+    });
+
     it('RF-1: an org-wide connection the program relies on (none of its own) still fails', async () => {
       const routes = healthy({
         'GET /v1/billing/connections': [{ id: 'bcon_org', provider: 'stripe', name: 'Org', status: 'awaiting_secret', programIds: null }],

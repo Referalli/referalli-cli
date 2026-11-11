@@ -5,6 +5,11 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.11 - 2026-11-11
+
+### Fixed
+- `doctor --program`: integration-health findings about org-wide connections follow the billing section's scope, and go into the other-programs line once the program has a connection of its own. Findings with `severity: "info"` show as ℹ.
+
 ## 0.4.10 - 2026-11-11
 
 ### Fixed

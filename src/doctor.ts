@@ -305,7 +305,9 @@ interface HealthCheck { id: string; ok: boolean; detail: string; fix?: string; d
 async function healthChecks(client: Client, scope: string[] | null, billing: BillingConnection[], tally: Tally): Promise<Check[]> {
   const res = await client.request<{ checks: HealthCheck[] }>('GET', '/v1/integration-health');
   // RF-1: a check about another program's billing connection (billing.<provider>.<id>) goes into the tally.
-  const others = new Set(billing.filter((c) => outside(scope, c.programIds)).map((c) => c.id));
+  // Also org-wide connections, once the scoped programs have connections of their own (as in billingChecks).
+  const hasOwn = !!scope && billing.some((c) => scope.some((p) => c.programIds?.includes(p)));
+  const others = new Set(billing.filter((c) => outside(scope, c.programIds) || (hasOwn && !c.programIds?.length)).map((c) => c.id));
   const theirs = (h: HealthCheck) => h.id.split('.').some((part) => others.has(part));
   tally.other += res.checks.filter((h) => !h.ok && theirs(h)).length;
   return res.checks.filter((h) => !theirs(h)).map((h): Check => {
@@ -313,7 +315,8 @@ async function healthChecks(client: Client, scope: string[] | null, billing: Bil
     if (h.ok) return { id, status: 'ok', message: h.detail };
     const severe = !scope && (h.severity === 'error' || h.severity === 'critical');
     const fix = [h.fix, h.docs].filter(Boolean).join(' ');
-    return { id, status: severe ? 'fail' : 'warn', message: h.detail, ...(fix ? { fix } : {}) };
+    const status = severe ? 'fail' : h.severity === 'info' ? 'info' : 'warn';
+    return { id, status, message: h.detail, ...(fix ? { fix } : {}) };
   });
 }
 
