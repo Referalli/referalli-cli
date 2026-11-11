@@ -416,6 +416,7 @@ interface ListedKey {
   expiresAt: string | null;
   expired: boolean;
   revokedAt: string | null;
+  programIds?: string[] | null;
 }
 
 /**
@@ -453,7 +454,7 @@ export async function keys(io: Io, sub: string | undefined, arg: string | undefi
     for (const k of rows) {
       const state = k.revokedAt ? 'revoked' : k.expired ? 'expired' : 'active';
       io.out(
-        [k.id, k.livemode ? 'live' : 'test', state, `${k.prefix}…`, k.name, k.owner ?? '-', k.scopes.join(','), k.lastUsedAt ? `used ${k.lastUsedAt}` : 'never used']
+        [k.id, k.livemode ? 'live' : 'test', state, `${k.prefix}…`, k.name, k.owner ?? '-', k.scopes.join(','), k.programIds?.length ? `programs ${k.programIds.join(',')}` : 'all programs', k.lastUsedAt ? `used ${k.lastUsedAt}` : 'never used']
           .join('  '),
       );
     }

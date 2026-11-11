@@ -62,6 +62,8 @@ interface Program {
   status: string;
   publicHandle?: string | null;
   publicPage?: { autoApprove?: boolean };
+  /** The program's own aff.js consent mode; null/absent: the org's. */
+  trackingConsent?: string | null;
   settings?: { settlement?: string; widget?: { autoEnroll?: boolean; destinationUrl?: string | null } };
 }
 
@@ -75,6 +77,16 @@ async function loadPrograms(client: Client, scope: string[] | null): Promise<Pro
 /** Outside the scope: limited to programs, none of them in it. Org-wide (null) resources concern every program. */
 const outside = (scope: string[] | null, programIds: string[] | null | undefined) =>
   Boolean(scope && programIds && programIds.length > 0 && !programIds.some((id) => scope.includes(id)));
+
+/** RF-1: problems found outside the scope, summed into one info line instead of failing the scoped run. */
+interface Tally { other: number }
+
+/**
+ * RF-1: a scoped run meets an org-wide resource the scoped programs don't use (each has one of its own):
+ * its failure is ⚠ with a note, never ✗.
+ */
+const unusedOrgWide = (c: Check, note: string): Check =>
+  c.status === 'fail' ? { ...c, status: 'warn', message: `${c.message} (org-wide, ${note})` } : c;
 
 async function termsChecks(client: Client, programs: Program[]): Promise<Check[]> {
   if (programs.length === 0) return [{ id: 'programs', status: 'warn', message: 'no active programs', fix: '/programs' }];
@@ -95,8 +107,10 @@ async function termsChecks(client: Client, programs: Program[]): Promise<Check[]
 
 interface Endpoint { id: string; url: string; status: string; health: string; consecutiveFailures: number; lastFailure: { statusCode: number | null; error: string | null } | null; programIds?: string[] | null }
 
-async function webhookChecks(client: Client, scope: string[] | null): Promise<Check[]> {
-  const endpoints = rows(await client.request<Endpoint[] | { data: Endpoint[] }>('GET', '/v1/webhook-endpoints')).filter((e) => !outside(scope, e.programIds));
+async function webhookChecks(client: Client, scope: string[] | null, tally: Tally): Promise<Check[]> {
+  const all = rows(await client.request<Endpoint[] | { data: Endpoint[] }>('GET', '/v1/webhook-endpoints'));
+  tally.other += all.filter((e) => outside(scope, e.programIds) && e.health !== 'healthy').length;
+  const endpoints = all.filter((e) => !outside(scope, e.programIds));
   if (endpoints.length === 0) return [{ id: 'webhooks', status: 'ok', message: 'no webhook endpoints' }];
   return endpoints.map((e): Check => {
     const id = `webhook.${e.id}`;
@@ -110,20 +124,28 @@ async function webhookChecks(client: Client, scope: string[] | null): Promise<Ch
 
 interface BillingConnection { id: string; provider: string; name: string; status: string; programIds?: string[] | null }
 
-async function billingChecks(client: Client, scope: string[] | null): Promise<Check[]> {
-  const conns = rows(await client.request<BillingConnection[] | { data: BillingConnection[] }>('GET', '/v1/billing/connections')).filter((c) => !outside(scope, c.programIds));
+function billingChecks(scope: string[] | null, all: BillingConnection[], tally: Tally): Check[] {
+  const conns = all.filter((c) => !outside(scope, c.programIds));
+  tally.other += all.filter((c) => outside(scope, c.programIds) && billingCheck(c).status !== 'ok').length;
   if (conns.length === 0) {
     return [{ id: 'billing', status: 'warn', message: "no billing connection: payments won't earn commission", fix: 'POST /v1/billing/connections' }];
   }
-  return conns.map((c): Check => {
-    const id = `billing.${c.id}`;
-    const label = `${c.provider} connection "${c.name}"`;
-    if (c.status === 'awaiting_secret') {
-      return { id, status: 'fail', message: `${label}: provider secret not set, every event is refused`, fix: `PUT /v1/billing/connections/${c.id}/secret {"webhookSecret":"…"}` };
-    }
-    if (c.status === 'paused') return { id, status: 'warn', message: `${label} is paused`, fix: `PATCH /v1/billing/connections/${c.id} {"status":"active"}` };
-    return { id, status: 'ok', message: `${label} is ${c.status}` };
+  // An org-wide connection matters to the scope only when one of its programs has no connection of its own.
+  const usesOrgWide = !scope || scope.some((p) => !all.some((c) => c.programIds?.includes(p)));
+  return conns.map((c) => {
+    const check = billingCheck(c);
+    return usesOrgWide || c.programIds?.length ? check : unusedOrgWide(check, 'not used by this program: it has its own billing connection');
   });
+}
+
+function billingCheck(c: BillingConnection): Check {
+  const id = `billing.${c.id}`;
+  const label = `${c.provider} connection "${c.name}"`;
+  if (c.status === 'awaiting_secret') {
+    return { id, status: 'fail', message: `${label}: provider secret not set, every event is refused`, fix: `PUT /v1/billing/connections/${c.id}/secret {"webhookSecret":"…"}` };
+  }
+  if (c.status === 'paused') return { id, status: 'warn', message: `${label} is paused`, fix: `PATCH /v1/billing/connections/${c.id} {"status":"active"}` };
+  return { id, status: 'ok', message: `${label} is ${c.status}` };
 }
 
 interface AuthConnection {
@@ -138,13 +160,16 @@ interface AuthConnection {
   /** R-30: when Referalli received the last sign-up (lastSignupAt is the sign-up's own time). */
   lastSignupReceivedAt?: string | null;
   lastError?: { at: string; code: string; message: string } | null;
+  /** RF-5: the last refused sign-up call. */
+  lastRejectedAt?: string | null;
+  lastRejectedReason?: string | null;
 }
 
-async function authChecks(client: Client, now: Date, programs: Program[], scope: string[] | null): Promise<Check[]> {
-  const conns = rows(await client.request<AuthConnection[] | { data: AuthConnection[] }>('GET', '/v1/auth/connections')).filter(
-    (c) => !scope || !c.programId || scope.includes(c.programId),
-  );
-  const out = conns.map((c): Check => {
+async function authChecks(client: Client, now: Date, programs: Program[], scope: string[] | null, tally: Tally): Promise<Check[]> {
+  const all = rows(await client.request<AuthConnection[] | { data: AuthConnection[] }>('GET', '/v1/auth/connections'));
+  const isOutside = (c: AuthConnection) => outside(scope, c.programId ? [c.programId] : null);
+  const conns = all.filter((c) => !isOutside(c));
+  const check = (c: AuthConnection): Check => {
     // Receipt time when the API has it: a late-filed sign-up must not look like a fresh one (R-30).
     const lastSignupAt = c.lastSignupReceivedAt ?? c.lastSignupAt;
     const id = `auth.${c.id}`;
@@ -159,14 +184,18 @@ async function authChecks(client: Client, now: Date, programs: Program[], scope:
     }
     // Protocol connections (Atlas, custom) can't be pinged with an API key: when it last filed a sign-up says it's wired.
     // undefined: an API from before lastSignupAt, nothing to say.
+    const rejected = c.lastRejectedAt ? `; last refused call ${c.lastRejectedAt}${c.lastRejectedReason ? ` (${c.lastRejectedReason})` : ''}` : '';
     if (lastSignupAt === null) {
-      return { id, status: 'warn', message: `${label} is ${c.status} but has never filed a sign-up`, fix: `sign up a user in your app (test sign-ups don't count) and check the platform calls connection ${c.id}` };
+      return { id, status: 'warn', message: `${label} is ${c.status} but has never filed a sign-up${rejected}`, fix: `sign up a user in your app (test sign-ups don't count) and check the platform calls connection ${c.id}` };
     }
     if (lastSignupAt && now.getTime() - new Date(lastSignupAt).getTime() > 30 * DAY) {
       return { id, status: 'warn', message: `${label} is ${c.status}; no sign-up since ${lastSignupAt}`, fix: `check the platform still calls connection ${c.id}` };
     }
-    return { id, status: 'ok', message: `${label} is ${c.status}${lastSignupAt ? `; last sign-up ${lastSignupAt}` : ''}` };
-  });
+    return { id, status: 'ok', message: `${label} is ${c.status}${lastSignupAt ? `; last sign-up ${lastSignupAt}` : ''}${rejected}` };
+  };
+  tally.other += all.filter((c) => isOutside(c) && check(c).status !== 'ok').length;
+  const usesOrgWide = !scope || scope.some((p) => !all.some((c) => c.programId === p));
+  const out = conns.map((c) => (usesOrgWide || c.programId ? check(c) : unusedOrgWide(check(c), 'not used by this program: it has its own auth connection')));
   // R-06: the Atlas referral panel mints widget tokens, which needs the program's widget set up.
   for (const c of conns.filter((x) => x.provider === 'atlas' && x.status === 'active')) {
     const p = programs.find((x) => x.id === c.programId);
@@ -194,7 +223,36 @@ async function authChecks(client: Client, now: Date, programs: Program[], scope:
 type Mode = 'live' | 'test';
 interface TrackingTokens { mode: Mode; live: { trackingToken: string }; test: { trackingToken: string } }
 
-async function trackingCheck(client: Client, env: NodeJS.ProcessEnv): Promise<Check[]> {
+interface Consent { mode: string; programOverrides?: Array<{ programId: string; programName: string; mode: string }> }
+
+/**
+ * RF-2: the consent mode aff.js serves each program: its own trackingConsent, else the org's.
+ * Scoped: the scope's programs. Unscoped: the org's mode, naming the programs that override it.
+ */
+function consentCheck(c: Consent, programs: Program[], scope: string[] | null): Check[] {
+  const id = 'tracking.consent';
+  const overrides = c.programOverrides ?? [];
+  const own = (p: Program) => p.trackingConsent ?? overrides.find((o) => o.programId === p.id)?.mode ?? null;
+  const why = 'aff.js stores the referral before the visitor chooses';
+  if (scope && programs.length > 0) {
+    const none = programs.filter((p) => (own(p) ?? c.mode) === 'none');
+    if (none.length > 0) {
+      const fixes = none.map((p) => (own(p) ? `PATCH /v1/programs/${p.id} {"trackingConsent":"auto"}` : null));
+      const fix = [...new Set(fixes.map((f) => f ?? `PUT /v1/org/tracking-consent {"mode":"auto"} (or /settings → Install)`))].join('; ');
+      return [{ id, status: 'warn', message: `tracking consent is 'none' for ${none.map((p) => `"${p.name}"`).join(', ')}: ${why}`, fix }];
+    }
+    const modes = programs.map((p) => (own(p) ? `uses ${own(p)}` : `uses the org's mode, ${c.mode}`));
+    return [{ id, status: 'ok', message: programs.length === 1 ? `program ${modes[0]}` : programs.map((p, i) => `"${p.name}" ${modes[i]}`).join('; ') }];
+  }
+  const listed = overrides.length ? `; programs with their own mode: ${overrides.map((o) => `"${o.programName}" ${o.mode}`).join(', ')}` : '';
+  // Every active program overrides 'none': the org's mode reaches nobody, so nothing to change org-wide.
+  const covered = programs.length > 0 && programs.every((p) => own(p));
+  return c.mode === 'none' && !covered
+    ? [{ id, status: 'warn', message: `tracking consent is 'none': ${why}${listed}`, fix: `PUT /v1/org/tracking-consent {"mode":"auto"} (or /settings → Install)` }]
+    : [{ id, status: 'ok', message: `tracking consent: ${c.mode}${listed}` }];
+}
+
+async function trackingCheck(client: Client, env: NodeJS.ProcessEnv, programs: Program[], scope: string[] | null): Promise<Check[]> {
   const org = await client.request<{ trackingToken: string; livemode?: boolean }>('GET', '/v1/org');
   const out: Check[] = [];
   try {
@@ -207,12 +265,9 @@ async function trackingCheck(client: Client, env: NodeJS.ProcessEnv): Promise<Ch
   // Consent mode `none` (orgs from before consent support start there): aff.js stores the referral before the visitor chooses.
   if (org.livemode !== false) {
     out.push(
-      ...(await guard('tracking.consent', '/settings → Install', async () => {
-        const c = await client.request<{ mode: string }>('GET', '/v1/org/tracking-consent');
-        return c.mode === 'none'
-          ? [{ id: 'tracking.consent', status: 'warn' as const, message: "tracking consent is 'none': aff.js stores the referral before the visitor chooses", fix: `PUT /v1/org/tracking-consent {"mode":"auto"} (or /settings → Install)` }]
-          : [{ id: 'tracking.consent', status: 'ok' as const, message: `tracking consent: ${c.mode}` }];
-      })),
+      ...(await guard('tracking.consent', '/settings → Install', async () =>
+        consentCheck(await client.request<Consent>('GET', '/v1/org/tracking-consent'), programs, scope),
+      )),
     );
   }
   // The token the product is configured with (run doctor with the app's env) must be this mode's.
@@ -243,9 +298,13 @@ interface HealthCheck { id: string; ok: boolean; detail: string; fix?: string; d
  * Every GET /v1/integration-health check, as `health.<id>`. A failed one is ✗ when the API marks it
  * `severity: "error"` (or critical), else ⚠. Scoped, never ✗: it may be about another program.
  */
-async function healthChecks(client: Client, scope: string[] | null): Promise<Check[]> {
+async function healthChecks(client: Client, scope: string[] | null, billing: BillingConnection[], tally: Tally): Promise<Check[]> {
   const res = await client.request<{ checks: HealthCheck[] }>('GET', '/v1/integration-health');
-  return res.checks.map((h): Check => {
+  // RF-1: a check about another program's billing connection (billing.<provider>.<id>) goes into the tally.
+  const others = new Set(billing.filter((c) => outside(scope, c.programIds)).map((c) => c.id));
+  const theirs = (h: HealthCheck) => h.id.split('.').some((part) => others.has(part));
+  tally.other += res.checks.filter((h) => !h.ok && theirs(h)).length;
+  return res.checks.filter((h) => !theirs(h)).map((h): Check => {
     const id = `health.${h.id}`;
     if (h.ok) return { id, status: 'ok', message: h.detail };
     const severe = !scope && (h.severity === 'error' || h.severity === 'critical');
@@ -444,21 +503,24 @@ export async function runDoctor(io: Io, client: Client, flags: Flags, now = new 
         return [{ id, status: 'warn', message: `skipped, this program-scoped key can't read it (${what})`, fix: `run doctor with an org-wide key (no programs) with ${scope}; read or full also work` }];
       }
     });
+  const tally: Tally = { other: 0 };
   let programs: Program[] = [];
   const programChecks = await guard('programs', undefined, async () => {
     programs = await loadPrograms(client, scope);
     return termsChecks(client, programs);
   });
+  // Read once: the billing checks and the health checks' tally both need it (health: empty if it can't be read; billing says why).
+  const billingList = client.request<BillingConnection[] | { data: BillingConnection[] }>('GET', '/v1/billing/connections').then(rows);
   const checks = [
     ...key,
     ...programChecks,
     ...(
       await Promise.all([
-        guard('webhooks', undefined, () => webhookChecks(client, scope)),
-        guard('billing', undefined, () => billingChecks(client, scope)),
-        orgWide('auth', () => authChecks(client, now, programs, scope)),
-        orgWide('tracking', () => trackingCheck(client, io.env)),
-        orgWide('health', () => healthChecks(client, scope)),
+        guard('webhooks', undefined, () => webhookChecks(client, scope, tally)),
+        guard('billing', undefined, async () => billingChecks(scope, await billingList, tally)),
+        orgWide('auth', () => authChecks(client, now, programs, scope, tally)),
+        orgWide('tracking', () => trackingCheck(client, io.env, programs, scope)),
+        orgWide('health', async () => healthChecks(client, scope, await billingList.catch((): BillingConnection[] => []), tally)),
         orgWide('payouts', () => payoutChecks(client, programs, apiKey?.livemode !== false)),
         orgWide('email', () => emailChecks(client, programs)),
         guard('commissions', undefined, () => unpaidChecks(client, programs, now)),
@@ -467,6 +529,10 @@ export async function runDoctor(io: Io, client: Client, flags: Flags, now = new 
       ])
     ).flat(),
   ];
+  if (tally.other > 0) {
+    const how = program ? 'run without --program (and REFERALLI_PROGRAM_ID)' : 'run with an org-wide key';
+    checks.push({ id: 'scope.other', status: 'info', message: `${tally.other} issue(s) in other programs; ${how} to see them` });
+  }
   printChecks((l) => io.out(l), checks, flags.json);
   return checks.some((c) => c.status === 'fail') ? 1 : 0;
 }

@@ -185,6 +185,8 @@ describe('referalli doctor', () => {
 
     it('never filed a sign-up, or none in 30 days: a warning', async () => {
       expect((await run(healthy(atlas(null)))).out).toContain('⚠ auth.acon_a: atlas auth connection "Atlas" is active but has never filed a sign-up');
+      const refused = { 'GET /v1/auth/connections': [{ ...atlas(null)['GET /v1/auth/connections'][0], lastRejectedAt: '2026-11-03T18:50:24.134Z', lastRejectedReason: 'validation_error: bad body' }] };
+      expect((await run(healthy(refused))).out).toContain('never filed a sign-up; last refused call 2026-11-03T18:50:24.134Z (validation_error: bad body)');
       const { code, out } = await run(healthy(atlas('2020-01-01T00:00:00.000Z')));
       expect(code).toBe(0);
       expect(out).toContain('⚠ auth.acon_a: atlas auth connection "Atlas" is active; no sign-up since 2020-01-01');
@@ -317,6 +319,54 @@ describe('referalli doctor', () => {
         }),
       );
       expect(out).toContain('⚠ auth.acon_a: atlas auth connection "Atlas" is active; no sign-up since 2020-01-01T00:00:00.000Z');
+    });
+  });
+
+  describe('FormFlow RF 2026-11-11: --program scope and program consent', () => {
+    const statuses = (out: string) => Object.fromEntries((JSON.parse(out) as { checks: Array<{ id: string; status: string }> }).checks.map((c) => [c.id, c.status]));
+
+    it("RF-1: an org-wide connection the program doesn't use is ⚠, another program's failures one info line; exit 0", async () => {
+      const routes = healthy({
+        'GET /v1/billing/connections': [
+          { id: 'bcon_ff', provider: 'generic', name: 'FormFlow', status: 'active', programIds: ['prg_1'] },
+          { id: 'bcon_cal', provider: 'stripe', name: 'Calendoro billing (live)', status: 'awaiting_secret', programIds: null },
+          { id: 'bcon_x', provider: 'paddle', name: 'X', status: 'awaiting_secret', programIds: ['prg_2'] },
+        ],
+        'GET /v1/integration-health': { ok: false, checks: [{ id: 'billing.paddle.bcon_x', ok: false, detail: 'secret not set', severity: 'error' }] },
+      });
+      const scoped = await run(routes, ['--program', 'prg_1']);
+      expect(scoped.code).toBe(0);
+      expect(scoped.out).toContain('⚠ billing.bcon_cal: stripe connection "Calendoro billing (live)": provider secret not set, every event is refused (org-wide, not used by this program');
+      expect(scoped.out).not.toContain('bcon_x');
+      expect(scoped.out).toContain('ℹ scope.other: 2 issue(s) in other programs; run without --program');
+      // Without --program everything shows and fails.
+      expect((await run(routes)).code).toBe(1);
+    });
+
+    it('RF-1: an org-wide connection the program relies on (none of its own) still fails', async () => {
+      const routes = healthy({
+        'GET /v1/billing/connections': [{ id: 'bcon_org', provider: 'stripe', name: 'Org', status: 'awaiting_secret', programIds: null }],
+      });
+      const { code, out } = await run(routes, ['--json', '--program', 'prg_1']);
+      expect(code).toBe(1);
+      expect(statuses(out)['billing.bcon_org']).toBe('fail');
+    });
+
+    it("RF-2: --program reads the program's trackingConsent; unscoped lists the overrides", async () => {
+      const routes = healthy({
+        'GET /v1/org/tracking-consent': { mode: 'none', programOverrides: [{ programId: 'prg_1', programName: 'Pro', mode: 'cookiemunch' }] },
+        'GET /v1/programs/prg_1': { id: 'prg_1', name: 'Pro', status: 'active', trackingConsent: 'cookiemunch' },
+      });
+      const scoped = await run(routes, ['--program', 'prg_1']);
+      expect(scoped.out).toContain('✓ tracking.consent: program uses cookiemunch');
+      expect(scoped.out).not.toContain('PUT /v1/org/tracking-consent');
+      // Every active program overrides: the org's 'none' reaches nobody.
+      const all = await run(routes);
+      expect(all.out).toContain('✓ tracking.consent: tracking consent: none; programs with their own mode: "Pro" cookiemunch');
+      // A program set to 'none' itself is fixed on the program, not org-wide.
+      const own = await run({ ...routes, 'GET /v1/programs/prg_1': { id: 'prg_1', name: 'Pro', status: 'active', trackingConsent: 'none' } }, ['--program', 'prg_1']);
+      expect(own.out).toContain(`⚠ tracking.consent: tracking consent is 'none' for "Pro"`);
+      expect(own.out).toContain('fix: PATCH /v1/programs/prg_1 {"trackingConsent":"auto"}');
     });
   });
 });

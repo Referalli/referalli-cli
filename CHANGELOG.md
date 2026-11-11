@@ -5,6 +5,14 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.9 - 2026-11-11
+
+### Changed
+- `doctor --program` only fails on the program's own resources. Other programs' problems become one line (`scope.other`), and an org-wide connection the program doesn't use is a warning.
+- The `tracking.consent` check uses the program's own `trackingConsent`, and never suggests an org-wide change for a program that overrides it.
+- Auth connections show the last refused sign-up call.
+- `keys list` shows each key's programs.
+
 ## 0.4.8 - 2026-11-11
 
 ### Added
