@@ -11,7 +11,7 @@ bump may include breaking changes; they are called out under **Changed**.
 - `doctor` runs every `/v1/integration-health` check, plus payouts, email provider, widget setup, unpaid approved commissions and the public join page.
 - `doctor` and `plan --prune` stay inside the key's programs; `REFERALLI_PROGRAM_ID` sets the default `--program`.
 - Webhooks in the yaml can match by `id`, so a URL change updates the endpoint and keeps its secret. `plan`/`apply --prune` delete what the file no longer lists.
-- New yaml sections: `payouts`, `email`, `trackingConsent`, `hostedPages`; program fields `widget`, `refereeReward`, `brand`, `termsUrl`, `faqUrl`, `supportUrl`, `trackingConsent`; `authConnections[].tokenVerification`.
+- New yaml sections: `payouts`, `email`, `trackingConsent`, `hostedPages`; program fields `widget`, `refereeReward`, `brand`, `termsUrl`, `faqUrl`, `supportUrl`, `trackingConsent`, `notificationEmails`, `howItWorksMd`; `authConnections[].tokenVerification`.
 - `referalli billing owner set <accountRef> <customerRef>`.
 
 ### Changed

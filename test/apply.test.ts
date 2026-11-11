@@ -35,8 +35,13 @@ function fakeAccount() {
     const ok = (x: unknown) => new Response(JSON.stringify(x), { status: 200 });
     if (route === 'GET /v1/programs') return ok({ object: 'list', data: db.programs, has_more: false }); // the 2026-11-01 envelope
     if (route === 'POST /v1/programs') {
-      const { widget, selfReferralPolicy, ...rest } = body!;
-      const settings = { selfReferralPolicy: selfReferralPolicy ?? 'review', widget: widget ?? { destinationUrl: null } };
+      const { widget, selfReferralPolicy, notificationEmails, howItWorksMd, ...rest } = body!;
+      const settings = {
+        selfReferralPolicy: selfReferralPolicy ?? 'review',
+        widget: widget ?? { destinationUrl: null },
+        notificationEmails: notificationEmails ?? { enabled: true },
+        howItWorksMd: howItWorksMd ?? '',
+      };
       const row: Row = { id: id('prg'), status: 'active', cookieWindowDays: 60, ...rest, settings };
       db.programs.push(row);
       return ok(row);
@@ -48,8 +53,8 @@ function fakeAccount() {
       const settings = row.settings as Record<string, unknown>;
       if (destinationUrl) settings.widget = { destinationUrl };
       if (selfReferralPolicy) settings.selfReferralPolicy = selfReferralPolicy;
-      for (const k of ['riskPolicy', 'widget']) {
-        if (row[k]) settings[k] = row[k]; // GET returns these under settings
+      for (const k of ['riskPolicy', 'widget', 'notificationEmails', 'howItWorksMd']) {
+        if (row[k] !== undefined) settings[k] = row[k]; // GET returns these under settings
         delete row[k];
       }
       return ok(row);
@@ -620,6 +625,8 @@ programs:
     brand: { name: FormFlow, logoUrl: https://example.com/logo.png }
     widget: { autoEnroll: true, destinationUrl: https://example.com/signup }
     refereeReward: { kind: store_credit, amountMinor: 500, currency: USD }
+    notificationEmails: { enabled: false }
+    howItWorksMd: Share your link and earn.
 authConnections:
   - provider: atlas
     instanceId: inst_1
@@ -648,7 +655,7 @@ hostedPages:
     expect(t.text()).toContain('    apiKey: "(none)" → "(from $RESEND_KEY)"');
     for (const secret of Object.values(env)) expect(t.text()).not.toContain(secret);
     const call = (method: string, path: string) => acct.calls.find((c) => c.method === method && c.path === path)!;
-    expect(call('POST', '/v1/programs').body).toMatchObject({ termsUrl: 'https://example.com/terms', brand: { name: 'FormFlow' }, widget: { autoEnroll: true } });
+    expect(call('POST', '/v1/programs').body).toMatchObject({ termsUrl: 'https://example.com/terms', brand: { name: 'FormFlow' }, widget: { autoEnroll: true }, notificationEmails: { enabled: false }, howItWorksMd: 'Share your link and earn.' });
     expect(call('PUT', '/v1/payout-connections/stripe').body).toEqual({ secretKey: 'sk_live_PAYOUTSECRET' });
     expect(call('PUT', '/v1/email/settings').body).toEqual({ provider: 'resend', fromAddress: 'partners@example.com', apiKey: 're_EMAILSECRET' });
     expect(call('PUT', '/v1/org/tracking-consent').body).toEqual({ mode: 'cookiemunch' });

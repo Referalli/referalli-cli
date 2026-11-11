@@ -74,7 +74,7 @@ export interface ApplyConfig {
 // Program fields compared against GET /v1/programs/{id} and sent as-is on PATCH.
 const PROGRAM_TOP = ['name', 'attributionModel', 'cookieWindowDays', 'signupToConversionDays', 'termsMd', 'status', 'publicHandle'] as const;
 // Program settings: PATCH takes them top-level, GET returns them under `settings`.
-const PROGRAM_SETTINGS = ['probabilisticPolicy', 'selfReferralPolicy', 'splitCommissions', 'allowPaidSearch', 'challengeLinks', 'settlement'] as const;
+const PROGRAM_SETTINGS = ['probabilisticPolicy', 'selfReferralPolicy', 'splitCommissions', 'allowPaidSearch', 'challengeLinks', 'settlement', 'howItWorksMd'] as const;
 // Passed through to PATCH as-is; read back top-level, else under `settings` (R-07/R-22/R-31 fields).
 const PROGRAM_PASS = ['termsUrl', 'faqUrl', 'supportUrl', 'trackingConsent'] as const;
 // Mappings merged into what's live: only the keys the file names are compared, and PATCH sends the live block with them applied.
@@ -82,10 +82,11 @@ const PROGRAM_BLOCKS = {
   publicPage: ['pitch', 'autoApprove'],
   riskPolicy: ['holdBotScore', 'holdRiskScore', 'holdHighRiskLevel', 'holdDisposableEmail', 'holdVelocity', 'holdUnverifiedEmail', 'holdSelfReferral'],
   widget: ['autoEnroll', 'destinationUrl'],
+  notificationEmails: ['enabled'],
   brand: ['name', 'logoUrl', 'theme', 'supportUrl', 'linkDomain', 'portalDomain', 'emailFrom'],
 } as const;
 // Blocks GET returns under `settings`.
-const SETTINGS_BLOCKS = ['riskPolicy', 'widget'];
+const SETTINGS_BLOCKS = ['riskPolicy', 'widget', 'notificationEmails'];
 const PROGRAM_KEYS = ['slug', ...PROGRAM_TOP, ...PROGRAM_SETTINGS, ...PROGRAM_PASS, ...Object.keys(PROGRAM_BLOCKS), 'destinationUrl', 'commissionRule', 'stripeCredits', 'refereeReward'];
 const STRIPE_KEYS = ['enabled', 'referrerMatch', 'metadataKey', 'refereeRewards', 'balanceCurrency', 'createCustomerIfMissing', 'waitForCustomer', 'secretKeyEnv'];
 const WEBHOOK_KEYS = ['id', 'url', 'topics', 'programs', 'status', 'alertContacts', 'managedBy'];
