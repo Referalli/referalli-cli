@@ -130,11 +130,15 @@ function billingChecks(scope: string[] | null, all: BillingConnection[], tally: 
   if (conns.length === 0) {
     return [{ id: 'billing', status: 'warn', message: "no billing connection: payments won't earn commission", fix: 'POST /v1/billing/connections' }];
   }
-  // An org-wide connection matters to the scope only when one of its programs has no connection of its own.
-  const usesOrgWide = !scope || scope.some((p) => !all.some((c) => c.programIds?.includes(p)));
+  // Scoped: a failing org-wide connection fails the run only when the program has nothing else that works
+  // (several products often share one org, each with its own org-wide connection).
+  const working = conns.filter((c) => billingCheck(c).status !== 'fail').length;
   return conns.map((c) => {
     const check = billingCheck(c);
-    return usesOrgWide || c.programIds?.length ? check : unusedOrgWide(check, 'not used by this program: it has its own billing connection');
+    if (!scope || c.programIds?.length || working === 0 || check.status !== 'fail') return check;
+    const own = all.some((o) => scope.some((p) => o.programIds?.includes(p)));
+    const why = own ? 'not used by this program: it has its own billing connection' : 'this program has another working connection';
+    return { ...unusedOrgWide(check, why), fix: `if it belongs to other programs, limit it: PATCH /v1/billing/connections/${c.id} {"programIds":["prg_…"]}` };
   });
 }
 

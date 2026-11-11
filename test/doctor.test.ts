@@ -343,6 +343,20 @@ describe('referalli doctor', () => {
       expect((await run(routes)).code).toBe(1);
     });
 
+    it('RF-1: several org-wide connections (one per product): a broken one is ⚠ while another works; exit 0', async () => {
+      const routes = healthy({
+        'GET /v1/billing/connections': [
+          { id: 'bcon_ff', provider: 'generic', name: 'FormFlow plans', status: 'active', programIds: null },
+          { id: 'bcon_cal', provider: 'stripe', name: 'Calendoro billing (live)', status: 'awaiting_secret', programIds: null },
+        ],
+      });
+      const { code, out } = await run(routes, ['--program', 'prg_1']);
+      expect(code).toBe(0);
+      expect(out).toContain('⚠ billing.bcon_cal: stripe connection "Calendoro billing (live)": provider secret not set, every event is refused (org-wide, this program has another working connection)');
+      expect(out).toContain('PATCH /v1/billing/connections/bcon_cal {"programIds":["prg_…"]}');
+      expect((await run(routes)).code).toBe(1);
+    });
+
     it('RF-1: an org-wide connection the program relies on (none of its own) still fails', async () => {
       const routes = healthy({
         'GET /v1/billing/connections': [{ id: 'bcon_org', provider: 'stripe', name: 'Org', status: 'awaiting_secret', programIds: null }],
