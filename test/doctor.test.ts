@@ -146,6 +146,21 @@ describe('referalli doctor', () => {
     expect(out).not.toContain("couldn't check");
   });
 
+  it("RF-2: a program-scoped key still checks consent, from the program's effectiveTrackingConsent", async () => {
+    const denied = () => err(403, 'program_scoped_key', 'limited to some programs');
+    const routes = healthy({
+      'GET /v1/me': { apiKey: { name: 'ci', scopes: ['read'], livemode: true, expiresAt: null, programIds: ['prg_1'] } },
+      'GET /v1/org': denied(),
+      'GET /v1/programs/prg_1': { id: 'prg_1', name: 'Pro', status: 'active', trackingConsent: null, effectiveTrackingConsent: 'auto' },
+    });
+    expect((await run(routes)).out).toContain("✓ tracking.consent: program uses the org's mode, auto");
+    const none = await run({ ...routes, 'GET /v1/programs/prg_1': { id: 'prg_1', name: 'Pro', status: 'active', trackingConsent: null, effectiveTrackingConsent: 'none' } });
+    expect(none.out).toContain(`⚠ tracking.consent: tracking consent is 'none' for "Pro"`);
+    // An API without the field: no consent line rather than a guess.
+    const old = await run({ ...routes, 'GET /v1/programs/prg_1': { id: 'prg_1', name: 'Pro', status: 'active' } });
+    expect(old.out).not.toContain('tracking.consent');
+  });
+
   it('a program-scoped key that also lacks the scope gets the same explanation (the API checks scope first)', async () => {
     const { out } = await run(
       healthy({

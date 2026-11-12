@@ -64,6 +64,8 @@ interface Program {
   publicPage?: { autoApprove?: boolean };
   /** The program's own aff.js consent mode; null/absent: the org's. */
   trackingConsent?: string | null;
+  /** GET /v1/programs/{id}: what aff.js serves it (its own mode, else the org's). */
+  effectiveTrackingConsent?: string;
   settings?: { settlement?: string; widget?: { autoEnroll?: boolean; destinationUrl?: string | null } };
 }
 
@@ -256,6 +258,13 @@ function consentCheck(c: Consent, programs: Program[], scope: string[] | null): 
     : [{ id, status: 'ok', message: `tracking consent: ${c.mode}${listed}` }];
 }
 
+/** RF-2 for program-scoped keys (no org read): the same check from each program's effectiveTrackingConsent. */
+function programConsentCheck(programs: Program[], scope: string[]): Check[] {
+  if (programs.length === 0 || programs.some((p) => !p.effectiveTrackingConsent)) return []; // older API
+  const orgMode = programs.find((p) => !p.trackingConsent)?.effectiveTrackingConsent ?? 'none';
+  return consentCheck({ mode: orgMode }, programs, scope);
+}
+
 async function trackingCheck(client: Client, env: NodeJS.ProcessEnv, programs: Program[], scope: string[] | null): Promise<Check[]> {
   const org = await client.request<{ trackingToken: string; livemode?: boolean }>('GET', '/v1/org');
   const out: Check[] = [];
@@ -398,7 +407,7 @@ export function printChecks(out: (line: string) => void, checks: Check[], json: 
 // What a program-scoped key is refused (the API's programScopedAllows), and the scope an org-wide key needs instead.
 const ORG_WIDE = {
   auth: { what: 'auth connections, Atlas sign-ups', scope: 'integrations:read or connections:read' },
-  tracking: { what: 'tracking token, consent mode, configured token', scope: 'org:read' },
+  tracking: { what: 'tracking token, configured token', scope: 'org:read' },
   health: { what: 'GET /v1/integration-health', scope: 'integrations:read' },
   payouts: { what: 'payout connections', scope: 'payouts:read' },
   email: { what: 'email settings', scope: 'org:read' },
@@ -527,6 +536,7 @@ export async function runDoctor(io: Io, client: Client, flags: Flags, now = new 
         guard('billing', undefined, async () => billingChecks(scope, await billingList, tally)),
         orgWide('auth', () => authChecks(client, now, programs, scope, tally)),
         orgWide('tracking', () => trackingCheck(client, io.env, programs, scope)),
+        ...(scoped && scope ? [guard('tracking.consent', undefined, async () => programConsentCheck(programs, scope))] : []),
         orgWide('health', async () => healthChecks(client, scope, await billingList.catch((): BillingConnection[] => []), tally)),
         orgWide('payouts', () => payoutChecks(client, programs, apiKey?.livemode !== false)),
         orgWide('email', () => emailChecks(client, programs)),
