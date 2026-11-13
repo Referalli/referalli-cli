@@ -13,6 +13,7 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
     "noEmit": true,
+    "incremental": true,
     "types": ["node"]
   }
 }

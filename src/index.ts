@@ -77,6 +77,7 @@ export async function runCli(argv: string[], baseIo: Io): Promise<number> {
         'expires-at': { type: 'string' },
         programs: { type: 'string' },
         pair: { type: 'boolean' },
+        'dry-run': { type: 'boolean' },
         cascade: { type: 'boolean' },
         plan: { type: 'boolean' },
         check: { type: 'boolean' },

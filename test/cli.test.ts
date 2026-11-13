@@ -47,6 +47,22 @@ describe('referalli CLI', () => {
     expect(api.calls[0]!.body).toMatchObject({ programIds: ['prg_a', 'prg_b'], expiresAt: '2027-01-01T00:00:00Z' });
   });
 
+  it('RF6: keys create --dry-run shows what would be minted and mints nothing', async () => {
+    const api = fakeApi({
+      'POST /v1/api-keys': (_b, url) => {
+        expect(url).toContain('dryRun=1');
+        return { dryRun: true, modes: ['live', 'test'], scopes: ['programs:write'], programIds: ['prg_a'], apiVersion: '2026-11-05', expiresAt: null };
+      },
+    });
+    const t = io({ ...tempEnv(), REFERALLI_API_KEY: 'rk_admin' }, api.fetchFn);
+    expect(await runCli(['keys', 'create', '--name', 'rt', '--scopes', 'programs:write', '--programs', 'prg_a', '--dry-run'], t.io)).toBe(0);
+    const out = t.out.join('\n');
+    expect(out).toContain('Dry run, nothing minted. Would mint live + test key(s) "rt"');
+    expect(out).toContain('scopes    programs:write');
+    expect(out).toContain('programs  prg_a');
+    expect(out).not.toContain('rk_');
+  });
+
   it('keys create explains an empty --programs', async () => {
     const api = fakeApi({});
     const t = io({ ...tempEnv(), REFERALLI_API_KEY: 'rk_admin' }, api.fetchFn);

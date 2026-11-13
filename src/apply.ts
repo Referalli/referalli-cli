@@ -540,7 +540,18 @@ export async function buildPlan(
       continue;
     }
     const { programs: refs, ...rest } = spec;
-    const shown = { mode: 'both', ...rest };
+    const shown: Obj = { mode: 'both', ...rest };
+    // RF6: when its programs already exist, the API checks the key now (scopes it may grant, programs) and
+    // fills in what it would get; a key for a program made in this same run is checked at apply time.
+    if (!refs?.length || refs.every((r) => ids.has(r))) {
+      const programIds = refs?.map((r) => ids.get(r)!);
+      const dry = await client
+        .request<{ scopes: string[]; apiVersion: string }>('POST', '/v1/api-keys?dryRun=1', { ...shown, ...(programIds ? { programIds } : {}) })
+        .catch((err: unknown) => {
+          throw new ConfigError(`${label}: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      shown.scopes ??= dry.scopes;
+    }
     changes.push({
       action: 'create',
       kind: 'apiKey',

@@ -83,6 +83,11 @@ function fakeAccount() {
     }
     if ((m = route.match(/^PATCH \/v1\/webhook-endpoints\/(\w+)$/))) return ok(Object.assign(db.hooks.find((h) => h.id === m![1])!, body));
     if (route === 'GET /v1/api-keys') return ok(db.keys.filter((k) => !u.searchParams.get('owner') || k.owner === u.searchParams.get('owner')));
+    if (route === 'POST /v1/api-keys' && u.searchParams.get('dryRun') === '1') {
+      const scopes = (body!.scopes as string[] | undefined) ?? ['full'];
+      if (scopes.includes('admin')) return new Response(JSON.stringify({ error: { code: 'forbidden', message: "this key can't grant scope(s) it doesn't hold: admin" } }), { status: 403 });
+      return ok({ dryRun: true, name: body!.name, modes: ['live', 'test'], scopes, programIds: body!.programIds ?? null, apiVersion: '2026-11-05', expiresAt: null });
+    }
     if (route === 'POST /v1/api-keys') {
       const mk = (livemode: boolean) => {
         const row = { id: id('key'), name: body!.name, owner: body!.owner ?? null, revokedAt: null, livemode };
@@ -378,6 +383,23 @@ billingConnections:
     const t3 = harness(fakeAccount());
     expect(await runCli(['plan', writeConfig('billingConnections:\n  - { name: s, provider: stripe, stripeKey: sk_x }')], t3.io)).toBe(1);
     expect(t3.text()).toContain('secrets never go in the file');
+  });
+
+  it('RF6: a new key whose programs exist is dry-run by the API at plan time; a refused one fails the plan', async () => {
+    const acct = fakeAccount();
+    expect(await runCli(['apply', writeConfig(JSON.stringify({ programs: [{ slug: 'pro', name: 'Pro' }] }))], harness(acct).io)).toBe(0);
+    acct.calls.length = 0;
+    const t = harness(acct);
+    expect(await runCli(['plan', writeConfig(JSON.stringify({ apiKeys: [{ name: 'runtime', programs: ['pro'] }] }))], t.io)).toBe(0);
+    expect(t.text()).toContain('+ create apiKey "runtime"');
+    expect(t.text()).toContain('scopes: ["full"]');
+    const dry = acct.calls.find((c) => c.method === 'POST')!;
+    expect(dry.path).toBe('/v1/api-keys?dryRun=1');
+    expect(dry.body).toMatchObject({ name: 'runtime', mode: 'both', programIds: [expect.stringMatching(/^prg_/)] });
+    expect(acct.calls.filter((c) => c.method !== 'GET')).toHaveLength(1);
+    const t2 = harness(acct);
+    expect(await runCli(['plan', writeConfig(JSON.stringify({ apiKeys: [{ name: 'boss', scopes: ['admin'] }] }))], t2.io)).toBe(1);
+    expect(t2.text()).toContain(`apiKey "boss": this key can't grant scope(s) it doesn't hold: admin`);
   });
 
   it('apply --plan only plans; JSON files work too', async () => {

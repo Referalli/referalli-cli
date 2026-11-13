@@ -426,7 +426,7 @@ interface ListedKey {
 export async function keys(io: Io, sub: string | undefined, arg: string | undefined, flags: Flags): Promise<number> {
   const { client } = signedIn(io);
   if (sub === 'create') {
-    if (typeof flags.name !== 'string') throw new CliError('Usage: referalli keys create --name NAME [--owner WHO] [--mode both|live|test] [--scopes full,…] [--programs ID,…] [--expires-days N | --expires-at ISO]');
+    if (typeof flags.name !== 'string') throw new CliError('Usage: referalli keys create --name NAME [--owner WHO] [--mode both|live|test] [--scopes full,…] [--programs ID,…] [--expires-days N | --expires-at ISO] [--dry-run]');
     const mode = typeof flags.mode === 'string' ? flags.mode : 'both';
     if (!['both', 'live', 'test'].includes(mode)) throw new CliError('--mode is both, live or test');
     const body: Record<string, unknown> = { name: flags.name, mode };
@@ -438,6 +438,16 @@ export async function keys(io: Io, sub: string | undefined, arg: string | undefi
       const programIds = String(flags.programs).split(',').map((x) => x.trim()).filter(Boolean);
       if (programIds.length === 0) throw new CliError('--programs needs at least one program id');
       body.programIds = programIds;
+    }
+    if (flags['dry-run']) {
+      // RF6: the API runs every check and answers what it would mint; nothing is minted.
+      const d = await client.request<{ modes: string[]; scopes: string[]; programIds: string[] | null; apiVersion: string; expiresAt: string | null }>('POST', '/v1/api-keys?dryRun=1', body);
+      io.out(`Dry run, nothing minted. Would mint ${d.modes.join(' + ')} key(s) "${String(flags.name)}":`);
+      io.out(`  scopes    ${d.scopes.join(', ')}`);
+      io.out(`  programs  ${d.programIds ? d.programIds.join(', ') : 'all (org-wide)'}`);
+      io.out(`  version   ${d.apiVersion}`);
+      io.out(`  expires   ${d.expiresAt ?? 'never'}`);
+      return 0;
     }
     const res = await client.request<IssuedKey | { pairId: string; live: IssuedKey; test: IssuedKey }>('POST', '/v1/api-keys', body);
     const issued = 'live' in res ? [res.live, res.test] : [res];
