@@ -284,6 +284,18 @@ describe('referalli plan / apply', () => {
     expect(acct.db.rules.at(-1)!.version).toBe(2);
   });
 
+  it('re-applying an earlier rule config publishes a new version under a new Idempotency-Key (Adviverse item 8)', async () => {
+    const acct = fakeAccount();
+    const v1 = writeConfig();
+    const v2 = writeConfig(YAML.replace('holdDays: 14', 'holdDays: 7'));
+    const ruleKeys = () => acct.calls.filter((c) => c.method === 'POST' && c.path === '/v1/commission-rules').map((c) => c.headers['idempotency-key']);
+    for (const f of [v1, v2, v1]) expect(await runCli(['apply', f], harness(acct, ENV).io)).toBe(0);
+    const keys = ruleKeys();
+    expect(keys).toHaveLength(3);
+    expect(new Set(keys).size).toBe(3); // the third would replay the first's response if the key came from the config alone
+    expect(acct.db.rules.at(-1)).toMatchObject({ version: 3, config: { holdDays: 14 } });
+  });
+
   it('manages balanceCurrency and createCustomerIfMissing, and never drops them by leaving them out of the PUT', async () => {
     const acct = fakeAccount();
     const withBoth = writeConfig(YAML.replace('secretKeyEnv: STRIPE_CREDIT_KEY', 'secretKeyEnv: STRIPE_CREDIT_KEY\n      balanceCurrency: EUR\n      createCustomerIfMissing: { metadata: { source: referalli } }'));

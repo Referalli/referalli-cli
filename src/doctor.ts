@@ -66,6 +66,8 @@ interface Program {
   trackingConsent?: string | null;
   /** GET /v1/programs/{id}: what aff.js serves it (its own mode, else the org's). */
   effectiveTrackingConsent?: string;
+  /** GET /v1/programs/{id}: the tracking token aff.js uses for it (the org's, in this mode). */
+  trackingToken?: string;
   settings?: { settlement?: string; widget?: { autoEnroll?: boolean; destinationUrl?: string | null } };
 }
 
@@ -265,8 +267,19 @@ function programConsentCheck(programs: Program[], scope: string[]): Check[] {
   return consentCheck({ mode: orgMode }, programs, scope);
 }
 
-async function trackingCheck(client: Client, env: NodeJS.ProcessEnv, programs: Program[], scope: string[] | null): Promise<Check[]> {
-  const org = await client.request<{ trackingToken: string; livemode?: boolean }>('GET', '/v1/org');
+async function trackingCheck(
+  client: Client,
+  env: NodeJS.ProcessEnv,
+  programs: Program[],
+  scope: string[] | null,
+  /** A program-scoped key: no org read; the token comes from the program (the consent check runs from the programs). */
+  scopedKey: { livemode: boolean } | null = null,
+): Promise<Check[]> {
+  const fromProgram = scopedKey ? programs.find((p) => p.trackingToken)?.trackingToken : undefined;
+  if (scopedKey && !fromProgram) throw new ApiError(403, 'program_scoped_key', 'older API: no trackingToken on the program'); // skipped as before
+  const org = fromProgram
+    ? { trackingToken: fromProgram, livemode: scopedKey!.livemode }
+    : await client.request<{ trackingToken: string; livemode?: boolean }>('GET', '/v1/org');
   const out: Check[] = [];
   try {
     const cfg = await client.request<{ cookieWindowDays: number }>('GET', `/t/${encodeURIComponent(org.trackingToken)}/config.json`);
@@ -276,7 +289,7 @@ async function trackingCheck(client: Client, env: NodeJS.ProcessEnv, programs: P
     out.push({ id: 'tracking', status: 'fail', message: `tracking token ${org.trackingToken} is unknown to /t/…/config.json`, fix: '/settings' });
   }
   // Consent mode `none` (orgs from before consent support start there): aff.js stores the referral before the visitor chooses.
-  if (org.livemode !== false) {
+  if (org.livemode !== false && !scopedKey) {
     out.push(
       ...(await guard('tracking.consent', '/settings → Install', async () =>
         consentCheck(await client.request<Consent>('GET', '/v1/org/tracking-consent'), programs, scope),
@@ -295,6 +308,8 @@ async function trackingCheck(client: Client, env: NodeJS.ProcessEnv, programs: P
     return out;
   }
   const other: Mode = mode === 'live' ? 'test' : 'live';
+  // A program key can't read the other mode's token, so it can't tell which one this is.
+  if (scopedKey) return [...out, { id, status: 'fail', message: `${name}=${configured} is not the ${mode} token (${org.trackingToken}): aff.js and links won't attribute to this program in ${mode} mode`, fix }];
   const tokens = await guard(id, fix, async () => {
     const t = await client.request<TrackingTokens>('GET', '/v1/org/tracking-tokens');
     if (t[other].trackingToken === configured) {
@@ -341,14 +356,40 @@ async function payoutChecks(client: Client, programs: Program[], live: boolean):
   return [{ id: 'payouts.connection', status: 'warn', message: `no payout connection while ${names} settle by payout: partners can only be paid by hand`, fix: 'PUT /v1/payout-connections/{provider} (Settings → Payouts), or settlement: merchant_credit' }];
 }
 
-/** Partners wait for approval (so they must hear back) but no email provider is set: nothing is sent. */
+/**
+ * Partners wait for approval (so they must hear back) but no email provider is set: nothing is sent.
+ * A program with its own provider (GET /v1/programs/{id}/email-settings) uses that one; only the rest need the org's.
+ */
 async function emailChecks(client: Client, programs: Program[]): Promise<Check[]> {
   const reviewing = programs.filter((p) => p.publicPage?.autoApprove === false);
   if (reviewing.length === 0) return [];
-  const s = await client.request<{ provider: string | null; hasApiKey?: boolean }>('GET', '/v1/email/settings');
-  if (s.provider && s.hasApiKey !== false) return [{ id: 'email.provider', status: 'ok', message: `email provider: ${s.provider}` }];
-  const names = reviewing.map((p) => `"${p.name}"`).join(', ');
-  return [{ id: 'email.provider', status: 'warn', message: `no email provider while ${names} approve partners by hand: partners get no emails`, fix: 'PUT /v1/email/settings {"provider":"…","apiKey":"…","fromAddress":"…"} (bring your own key)' }];
+  type Own = { configured?: boolean; provider: string | null; hasApiKey?: boolean };
+  const own = await Promise.all(
+    reviewing.map((p) => client.request<Own>('GET', `/v1/programs/${encodeURIComponent(p.id)}/email-settings`).catch((err: unknown) => {
+      if (err instanceof ApiError && err.status === 404) return null; // older API
+      throw err;
+    })),
+  );
+  const out: Check[] = [];
+  const rest: Program[] = [];
+  reviewing.forEach((p, i) => {
+    const o = own[i];
+    if (o?.configured && o.hasApiKey !== false) out.push({ id: 'email.provider', status: 'ok', message: `email provider for "${p.name}": ${o.provider} (its own)` });
+    else rest.push(p);
+  });
+  if (rest.length === 0) return out;
+  let s: { provider: string | null; hasApiKey?: boolean };
+  try {
+    s = await client.request<{ provider: string | null; hasApiKey?: boolean }>('GET', '/v1/email/settings');
+  } catch (err) {
+    // A program key: the org's settings are out of reach, but the programs' own were read above.
+    if (!(err instanceof ApiError && err.status === 403)) throw err;
+    const names = rest.map((p) => `"${p.name}"`).join(', ');
+    return [...out, { id: 'email.provider', status: 'warn', message: `${names} ${rest.length === 1 ? 'has' : 'have'} no email provider of its own, and this key can't read the org's`, fix: 'PUT /v1/programs/{id}/email-settings, or run doctor with an org-wide key' }];
+  }
+  if (s.provider && s.hasApiKey !== false) return [...out, { id: 'email.provider', status: 'ok', message: `email provider: ${s.provider}` }];
+  const names = rest.map((p) => `"${p.name}"`).join(', ');
+  return [...out, { id: 'email.provider', status: 'warn', message: `no email provider while ${names} approve partners by hand: partners get no emails`, fix: 'PUT /v1/email/settings {"provider":"…","apiKey":"…","fromAddress":"…"} (bring your own key), or PUT /v1/programs/{id}/email-settings for one program' }];
 }
 
 /** Approved commissions still unpaid after 30 days: a payout run is overdue (or partners have no payout method). */
@@ -535,7 +576,7 @@ export async function runDoctor(io: Io, client: Client, flags: Flags, now = new 
         guard('webhooks', undefined, () => webhookChecks(client, scope, tally)),
         guard('billing', undefined, async () => billingChecks(scope, await billingList, tally)),
         orgWide('auth', () => authChecks(client, now, programs, scope, tally)),
-        orgWide('tracking', () => trackingCheck(client, io.env, programs, scope)),
+        orgWide('tracking', () => trackingCheck(client, io.env, programs, scope, scoped ? { livemode: apiKey?.livemode !== false } : null)),
         ...(scoped && scope ? [guard('tracking.consent', undefined, async () => programConsentCheck(programs, scope))] : []),
         orgWide('health', async () => healthChecks(client, scope, await billingList.catch((): BillingConnection[] => []), tally)),
         orgWide('payouts', () => payoutChecks(client, programs, apiKey?.livemode !== false)),

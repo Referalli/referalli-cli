@@ -161,6 +161,30 @@ describe('referalli doctor', () => {
     expect(old.out).not.toContain('tracking.consent');
   });
 
+  it("Adviverse #3: a program-scoped key checks tracking from the program's token and email from the program's own settings", async () => {
+    const denied = () => err(403, 'program_scoped_key', 'limited to some programs');
+    const program = { id: 'prg_1', name: 'Pro', status: 'active', trackingConsent: null, effectiveTrackingConsent: 'auto', trackingToken: 'tok_1', publicPage: { autoApprove: false } };
+    const routes = healthy({
+      'GET /v1/me': { apiKey: { name: 'ci', scopes: ['read'], livemode: true, expiresAt: null, programIds: ['prg_1'] } },
+      'GET /v1/org': denied(),
+      'GET /v1/org/tracking-consent': denied(),
+      'GET /v1/email/settings': denied(),
+      'GET /v1/programs/prg_1': program,
+      'GET /v1/programs/prg_1/email-settings': { programId: 'prg_1', configured: true, provider: 'hermetica', hasApiKey: true },
+    });
+    const { out } = await run(routes, [], { REFERALLI_TRACKING_TOKEN: 'tok_1' });
+    expect(out).toContain('✓ tracking: tracking token tok_1 answers');
+    expect(out).toContain("✓ tracking.configured: REFERALLI_TRACKING_TOKEN is the org's live token");
+    expect(out).toContain('✓ email.provider: email provider for "Pro": hermetica (its own)');
+    expect(out).not.toContain('skipped');
+    // Wrong token: said without reading the other mode's.
+    const wrong = await run(routes, [], { REFERALLI_TRACKING_TOKEN: 'tok_other' });
+    expect(wrong.out).toContain('✗ tracking.configured: REFERALLI_TRACKING_TOKEN=tok_other is not the live token (tok_1)');
+    // No settings of its own and the org's out of reach: a warning, not a skip.
+    const noOwn = await run({ ...routes, 'GET /v1/programs/prg_1/email-settings': { programId: 'prg_1', configured: false, provider: null, hasApiKey: false } });
+    expect(noOwn.out).toContain(`⚠ email.provider: "Pro" has no email provider of its own, and this key can't read the org's`);
+  });
+
   it('a program-scoped key that also lacks the scope gets the same explanation (the API checks scope first)', async () => {
     const { out } = await run(
       healthy({

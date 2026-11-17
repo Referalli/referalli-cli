@@ -368,7 +368,8 @@ export async function buildPlan(
       const latest = cur ? (await listAll<{ id: string; version: number; config: Obj }>(client, `/v1/commission-rules?programId=${encodeURIComponent(cur.id)}`))[0] : undefined;
       const publish = async (ctx: RunCtx) => {
         const programId = ctx.ids.get(spec.slug)!;
-        await create(ctx.client, '/v1/commission-rules', 'rule', spec.slug, { programId, config: spec.commissionRule });
+        // The version it replaces is in the key: re-applying an earlier config is a new version, not a replayed one.
+        await create(ctx.client, '/v1/commission-rules', 'rule', `${spec.slug}@v${latest?.version ?? 0}`, { programId, config: spec.commissionRule });
         return [];
       };
       if (!latest) {
