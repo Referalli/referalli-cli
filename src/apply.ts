@@ -74,7 +74,7 @@ export interface ApplyConfig {
 // Program fields compared against GET /v1/programs/{id} and sent as-is on PATCH.
 const PROGRAM_TOP = ['name', 'attributionModel', 'cookieWindowDays', 'signupToConversionDays', 'termsMd', 'status', 'publicHandle'] as const;
 // Program settings: PATCH takes them top-level, GET returns them under `settings`.
-const PROGRAM_SETTINGS = ['probabilisticPolicy', 'selfReferralPolicy', 'splitCommissions', 'allowPaidSearch', 'challengeLinks', 'settlement', 'howItWorksMd'] as const;
+const PROGRAM_SETTINGS = ['probabilisticPolicy', 'selfReferralPolicy', 'splitCommissions', 'allowPaidSearch', 'challengeLinks', 'settlement', 'creditRate', 'howItWorksMd'] as const;
 // Passed through to PATCH as-is; read back top-level, else under `settings` (R-07/R-22/R-31 fields).
 const PROGRAM_PASS = ['termsUrl', 'faqUrl', 'supportUrl', 'trackingConsent'] as const;
 // Mappings merged into what's live: only the keys the file names are compared, and PATCH sends the live block with them applied.
@@ -370,7 +370,8 @@ export async function buildPlan(
 
     if (spec.commissionRule) {
       const want = { ...RULE_DEFAULTS, ...spec.commissionRule };
-      const rlabel = `commissionRule "${spec.slug}"`;
+      // A draft accrues nothing: said on every plan, unchanged ones too (convertmepls R3).
+      const rlabel = `commissionRule "${spec.slug}"${spec.commissionRule.draft === true ? ' [draft: accrues nothing, terms hidden]' : ''}`;
       const latest = cur ? (await listAll<{ id: string; version: number; config: Obj }>(client, `/v1/commission-rules?programId=${encodeURIComponent(cur.id)}`))[0] : undefined;
       const publish = async (ctx: RunCtx) => {
         const programId = ctx.ids.get(spec.slug)!;

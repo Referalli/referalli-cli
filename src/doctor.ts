@@ -59,6 +59,7 @@ async function keyCheck(client: Client, now: Date): Promise<{ checks: Check[]; k
 interface Program {
   id: string;
   name: string;
+  slug?: string;
   status: string;
   publicHandle?: string | null;
   publicPage?: { autoApprove?: boolean };
@@ -71,6 +72,20 @@ interface Program {
   /** How long after a click a sign-up still counts for this program (attribution uses this, not the cookie's lifetime). */
   cookieWindowDays?: number;
   settings?: { settlement?: string; widget?: { autoEnroll?: boolean; destinationUrl?: string | null } };
+}
+
+/** A program id for an id, slug or public handle; null when this key can't see one. */
+async function resolveProgram(client: Client, ref: string): Promise<string | null> {
+  if (ref.startsWith('prg_')) {
+    try {
+      return (await client.request<Program>('GET', `/v1/programs/${encodeURIComponent(ref)}`)).id;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) return null;
+      throw err;
+    }
+  }
+  const all = rows(await client.request<Program[] | { data: Program[] }>('GET', '/v1/programs'));
+  return all.find((p) => p.slug === ref || p.publicHandle === ref)?.id ?? null;
 }
 
 /** The programs doctor checks: the scope's (each fetched), else every active one. */
@@ -100,7 +115,10 @@ async function termsChecks(client: Client, programs: Program[]): Promise<Check[]
     programs.map((p) =>
       guard(`program.${p.id}.terms`, undefined, async () => {
         try {
-          await client.request('GET', `/v1/programs/${encodeURIComponent(p.id)}/terms`);
+          const terms = await client.request<{ draft?: boolean } | null>('GET', `/v1/programs/${encodeURIComponent(p.id)}/terms`);
+          if (terms?.draft) {
+            return [{ id: `program.${p.id}.terms`, status: 'warn', message: `program "${p.name}"'s commission rule is a draft: it accrues nothing, and partners and the join page see no terms`, fix: 'publish the rule without draft once it is decided (remove draft: true from commissionRule, then apply)' }];
+          }
           return [{ id: `program.${p.id}.terms`, status: 'ok', message: `program "${p.name}" has a commission rule` }];
         } catch (err) {
           if (!(err instanceof ApiError && err.status === 404)) throw err;
@@ -551,8 +569,18 @@ async function e2eChecks(client: Client, programId: string, fetchFn: typeof fetc
  * Scope (R-08): --program (REFERALLI_PROGRAM_ID fills it in), else the key's programs, else every active program.
  */
 export async function runDoctor(io: Io, client: Client, flags: Flags, now = new Date()): Promise<number> {
-  const program = typeof flags.program === 'string' ? flags.program : undefined;
   const { checks: key, key: apiKey } = await keyCheck(client, now);
+  // A slug works as it does in plan and apply; a program that can't be found stops here (exit 1) instead of grading
+  // every other check against nothing (convertmepls R1).
+  let program = typeof flags.program === 'string' ? flags.program : undefined;
+  if (program) {
+    const found = await resolveProgram(client, program);
+    if (!found) {
+      printChecks((l) => io.out(l), [...key, { id: 'program', status: 'fail', message: `no program "${program}" that this key can see (by id, slug or public handle)`, fix: 'referalli api GET /v1/programs (lists the ids and slugs)' }], flags.json);
+      return 1;
+    }
+    program = found;
+  }
   const scoped = Boolean(apiKey?.programIds);
   const scope = program ? [program] : (apiKey?.programIds ?? null);
   const fetchFn = io.fetchFn ?? fetch;

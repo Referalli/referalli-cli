@@ -444,6 +444,18 @@ billingConnections:
     expect(acct.calls.every((c) => c.method === 'GET')).toBe(true);
   });
 
+  it('convertmepls R3: a draft rule is marked on the plan', async () => {
+    const t = harness(fakeAccount());
+    expect(await runCli(['plan', writeConfig('programs:\n  - slug: pro\n    commissionRule: { base: { kind: percent, bps: 1000 }, draft: true }')], t.io)).toBe(0);
+    expect(t.text()).toContain('commissionRule "pro" [draft: accrues nothing, terms hidden]');
+  });
+
+  it('convertmepls R6: --file names the config as the positional argument does', async () => {
+    const t = harness(fakeAccount());
+    expect(await runCli(['plan', '--file', writeConfig('programs:\n  - slug: pro')], t.io)).toBe(0);
+    expect(t.text()).toContain('program "pro"');
+  });
+
   it('rejects secrets, typos, unknown program refs and a missing key env var with a clear message', async () => {
     const cases: Array<[string, string, Record<string, string>?]> = [
       ['programs:\n  - slug: pro\n    stripeCredits: { enabled: true, secretKey: rk_test_x }', 'secrets never go in the file'],

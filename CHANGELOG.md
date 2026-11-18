@@ -5,6 +5,16 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.16 - 2026-11-18
+
+### Added
+- `plan` and `apply` take the config file as `--file <path>` as well as positionally.
+- `commissionRule.draft: true` is marked on every plan (`[draft: accrues nothing, terms hidden]`), and `doctor` warns while a program's rule is a draft instead of passing it.
+- Programs take `creditRate` (`{amountMinor, currency}`: what one of your credits costs) in the config.
+
+### Fixed
+- `doctor --program` takes a slug or public handle as `plan` does. A program the key can't see fails at once (exit 1) instead of grading the other checks against nothing.
+
 ## 0.4.15 - 2026-11-18
 
 ### Added

@@ -83,6 +83,25 @@ describe('referalli doctor', () => {
     expect(byId(without.out)).toMatchObject({ e2e: 'warn' });
   });
 
+  it('convertmepls R1: --program takes a slug; an unknown program fails at once (exit 1) instead of grading the rest', async () => {
+    const routes = healthy({ 'GET /v1/programs': [{ id: 'prg_1', name: 'Pro', status: 'active', slug: 'pro' }] });
+    const bySlug = await run(routes, ['--program', 'pro']);
+    expect(bySlug.out).toContain('✓ program.prg_1.terms');
+    expect(bySlug.out).not.toContain('not_found');
+    const unknown = await run(routes, ['--program', 'nope']);
+    expect(unknown.code).toBe(1);
+    expect(unknown.out).toContain('✗ program: no program "nope" that this key can see (by id, slug or public handle)');
+    expect(unknown.out).not.toContain('billing');
+    const unknownId = await run(routes, ['--program', 'prg_missing']);
+    expect(unknownId.code).toBe(1);
+    expect(unknownId.out).toContain('no program "prg_missing"');
+  });
+
+  it('a draft commission rule is a warning, not "has a commission rule"', async () => {
+    const { out } = await run(healthy({ 'GET /v1/programs/prg_1/terms': { base: { kind: 'percent', bps: 2000 }, draft: true } }));
+    expect(out).toContain(`⚠ program.prg_1.terms: program "Pro"'s commission rule is a draft: it accrues nothing`);
+  });
+
   it('--e2e needs --program', async () => {
     expect((await run(healthy(), ['--e2e'])).out).toContain('--program');
   });

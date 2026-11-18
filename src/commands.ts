@@ -515,7 +515,10 @@ const SECRET_FIELDS = ['webhookSecret', 'secret', 'key'] as const;
 // --- plan / apply ------------------------------------------------------------------
 
 /** `referalli plan <file> [--prune]` / `referalli apply <file> [--plan] [--check] [--prune] [--secret-file PATH]`. */
-export async function apply(io: Io, file: string | undefined, flags: Flags, planOnly: boolean): Promise<number> {
+export async function apply(io: Io, positional: string | undefined, flags: Flags, planOnly: boolean): Promise<number> {
+  // `--file` as other ForgeDeck CLIs take it (convertmepls R6); the file is positional otherwise.
+  const file = positional ?? (typeof flags.file === 'string' ? flags.file : undefined);
+  if (positional && typeof flags.file === 'string' && flags.file !== positional) throw new CliError('give the config file once: positionally or with --file');
   if (!file) throw new CliError(planOnly ? 'Usage: referalli plan <referalli.yaml> [--check] [--prune]' : 'Usage: referalli apply <referalli.yaml> [--plan] [--check] [--prune] [--secret-file PATH] [--secret-format env|json]');
   const { client } = signedIn(io);
   try {
