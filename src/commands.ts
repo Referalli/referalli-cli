@@ -516,7 +516,7 @@ const SECRET_FIELDS = ['webhookSecret', 'secret', 'key'] as const;
 
 /** `referalli plan <file> [--prune]` / `referalli apply <file> [--plan] [--check] [--prune] [--secret-file PATH]`. */
 export async function apply(io: Io, file: string | undefined, flags: Flags, planOnly: boolean): Promise<number> {
-  if (!file) throw new CliError(planOnly ? 'Usage: referalli plan <referalli.yaml> [--check] [--prune]' : 'Usage: referalli apply <referalli.yaml> [--plan] [--check] [--prune] [--secret-file PATH]');
+  if (!file) throw new CliError(planOnly ? 'Usage: referalli plan <referalli.yaml> [--check] [--prune]' : 'Usage: referalli apply <referalli.yaml> [--plan] [--check] [--prune] [--secret-file PATH] [--secret-format env|json]');
   const { client } = signedIn(io);
   try {
     return await runApply(io, client, file, {
@@ -524,6 +524,7 @@ export async function apply(io: Io, file: string | undefined, flags: Flags, plan
       check: flags.check === true,
       prune: flags.prune === true,
       secretFile: typeof flags['secret-file'] === 'string' ? flags['secret-file'] : undefined,
+      secretFormat: typeof flags['secret-format'] === 'string' ? flags['secret-format'] : undefined,
     });
   } catch (err) {
     if (err instanceof ConfigError) throw new CliError(err.message);

@@ -5,6 +5,32 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.15 - 2026-11-18
+
+### Added
+- `apply --secret-format env` (or a `--secret-file` path ending in `.env`, such as `.env.local`) writes new secrets as dotenv lines, `REFERALLI_<LABEL>=…` under a `# <label>` comment.
+- `--secret-file` adds to an existing file instead of refusing it: the new secrets are appended through a temp file renamed over it (mode 600). If a name is already there, they go to `<path>.<timestamp>` beside it, and the output names that file. A JSON file that can't be read is still refused before anything is created.
+
+### Fixed
+- `doctor --program`: the tracking line gives the program's own attribution window (`cookieWindowDays`). When it differs, it also says the cookie is kept for the org's longest window. Before, it gave only the cookie's lifetime, which read as the program's window.
+- A config field placed one level off says where it goes: `programs[0].brand: "termsUrl" is not a field here; it goes at programs[0].termsUrl (one level up)`. The same applies to widget, brand and other block fields put on the program.
+
+## 0.4.14 - 2026-11-17
+
+### Fixed
+- `doctor` with a program-scoped key checks tracking from the program's `trackingToken` (and `REFERALLI_TRACKING_TOKEN` against it) and email from the program's own email settings, instead of skipping both.
+- `apply`: going back to an earlier commission rule publishes it. The Idempotency-Key now includes the version it replaces, so it is no longer taken for a replay of the first publish.
+
+## 0.4.13 - 2026-11-13
+
+### Added
+- `keys create --dry-run` answers the key(s) it would mint after every check, with nothing minted. `plan` checks the keys a config would create the same way.
+
+## 0.4.12 - 2026-11-12
+
+### Fixed
+- `doctor` with a program-scoped key checks the tracking consent mode from each program's `effectiveTrackingConsent` instead of skipping it.
+
 ## 0.4.11 - 2026-11-11
 
 ### Fixed

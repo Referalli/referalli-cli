@@ -27,7 +27,7 @@ Usage:
   referalli keys list [--owner WHO] [--mode live|test]
   referalli keys revoke <key id> [--pair] [--cascade]
   referalli plan <referalli.yaml> [--check] [--prune]
-  referalli apply <referalli.yaml> [--plan] [--check] [--prune] [--secret-file PATH]
+  referalli apply <referalli.yaml> [--plan] [--check] [--prune] [--secret-file PATH] [--secret-format env|json]
   referalli doctor [--program <id>] [--json]
   referalli doctor --program <id> --e2e [--json]      (also tests the program from outside; see the docs)
   referalli doctor --scan <dir> [--strict] [--json]   (old Referally names in a source tree; no key needed)
@@ -69,6 +69,7 @@ export async function runCli(argv: string[], baseIo: Io): Promise<number> {
         connection: { type: 'string' },
         program: { type: 'string' },
         'secret-file': { type: 'string' },
+        'secret-format': { type: 'string' },
         name: { type: 'string' },
         owner: { type: 'string' },
         mode: { type: 'string' },

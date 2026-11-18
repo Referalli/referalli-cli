@@ -343,14 +343,35 @@ describe('referalli plan / apply', () => {
     });
     if (process.platform !== 'win32') expect(statSync(secretFile).mode & 0o777).toBe(0o600);
 
-    // An existing secret file is refused before anything is created.
-    const before = acct.calls.length;
+    // Upcify RF-U3: an existing file with the same names: the new secrets go beside it, nothing is overwritten.
+    const t2 = harness(fakeAccount(), ENV);
+    expect(await runCli(['apply', writeConfig(), '--secret-file', secretFile], t2.io)).toBe(0);
+    const aside = /went to (\S+) \(mode 600\)/.exec(t2.text())?.[1];
+    expect(aside).toMatch(/secrets\.json\.\d+$/);
+    expect(JSON.parse(readFileSync(secretFile, 'utf8'))).toEqual(saved);
+    expect(Object.keys(JSON.parse(readFileSync(aside!, 'utf8')) as object)).toHaveLength(3);
+    for (const s of SECRETS) expect(t2.text()).not.toContain(s);
+
+    // A file it can't add to is refused before anything is created.
+    const bad = join(dir(), 'notes.txt');
+    writeFileSync(bad, 'not json');
     const fresh = fakeAccount();
-    const t2 = harness(fresh, ENV);
-    expect(await runCli(['apply', writeConfig(), '--secret-file', secretFile], t2.io)).toBe(1);
-    expect(t2.text()).toContain('already exists');
+    const t3 = harness(fresh, ENV);
+    expect(await runCli(['apply', writeConfig(), '--secret-file', bad], t3.io)).toBe(1);
+    expect(t3.text()).toContain("isn't a JSON object");
     expect(fresh.calls.filter((c) => c.method !== 'GET')).toEqual([]);
-    expect(acct.calls.length).toBe(before);
+  });
+
+  it('--secret-format env (or a .env path) appends dotenv lines to an existing file, mode 600', async () => {
+    const envFile = join(dir(), '.env.local');
+    writeFileSync(envFile, 'DATABASE_URL=postgres://x', { mode: 0o644 });
+    const t = harness(fakeAccount(), ENV);
+    expect(await runCli(['apply', writeConfig(), '--secret-file', envFile], t.io)).toBe(0);
+    const text = readFileSync(envFile, 'utf8');
+    expect(text).toContain('DATABASE_URL=postgres://x\n# webhook https://example.com/hooks/referalli\nREFERALLI_WEBHOOK_HTTPS_EXAMPLE_COM_HOOKS_REFERALLI=whsec_TOPSECRET\n');
+    expect(text).toContain('REFERALLI_APIKEY_CI_CI_EXAMPLE_COM_LIVE=rk_live_SECRETKEY');
+    if (process.platform !== 'win32') expect(statSync(envFile).mode & 0o777).toBe(0o600);
+    for (const s of SECRETS) expect(t.text()).not.toContain(s);
   });
 
   it('billing connections: created by name with the secret to the secret file, unchanged on re-plan, drift exits 2 and PATCHes', async () => {
@@ -427,6 +448,8 @@ billingConnections:
     const cases: Array<[string, string, Record<string, string>?]> = [
       ['programs:\n  - slug: pro\n    stripeCredits: { enabled: true, secretKey: rk_test_x }', 'secrets never go in the file'],
       ['programs:\n  - slug: pro\n    cookieWindow: 30', 'unknown field "cookieWindow"'],
+      // Upcify RF-U4: a field one level off says where it goes.
+      ['programs:\n  - slug: pro\n    brand: { termsUrl: "https://x.test/terms" }', '"termsUrl" is not a field here; it goes at programs[0].termsUrl (one level up)'],
       ['webhooks:\n  - url: https://x.test/h\n    programs: [nope]', 'unknown program "nope"'],
       ['programs:\n  - slug: pro\n    stripeCredits: { enabled: true, secretKeyEnv: MISSING_KEY }', 'MISSING_KEY is not set'],
       ['programs: [', 'referalli.yaml'],

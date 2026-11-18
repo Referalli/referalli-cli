@@ -93,7 +93,7 @@ describe('referalli doctor', () => {
     expect(out).not.toMatch(/[⚠✗]/);
     expect(out).toContain('✓ program.prg_1.terms');
     expect(out).not.toContain('prg_2');
-    expect(out).toContain('cookie window 60 days');
+    expect(out).toContain('cookie kept 60 days (the longest program window)');
   });
 
   it('an awaiting_secret billing connection fails with the PUT …/secret fix, exit 1', async () => {
@@ -177,6 +177,9 @@ describe('referalli doctor', () => {
     expect(out).toContain("✓ tracking.configured: REFERALLI_TRACKING_TOKEN is the org's live token");
     expect(out).toContain('✓ email.provider: email provider for "Pro": hermetica (its own)');
     expect(out).not.toContain('skipped');
+    // Upcify RF-U2: the program's own window, not the cookie's org-wide lifetime.
+    const win = await run({ ...routes, 'GET /v1/programs/prg_1': { ...program, cookieWindowDays: 30 } });
+    expect(win.out).toContain('attribution window 30 days (the cookie is kept 60 days, the longest window of any program in the org)');
     // Wrong token: said without reading the other mode's.
     const wrong = await run(routes, [], { REFERALLI_TRACKING_TOKEN: 'tok_other' });
     expect(wrong.out).toContain('✗ tracking.configured: REFERALLI_TRACKING_TOKEN=tok_other is not the live token (tok_1)');

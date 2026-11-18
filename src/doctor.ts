@@ -68,6 +68,8 @@ interface Program {
   effectiveTrackingConsent?: string;
   /** GET /v1/programs/{id}: the tracking token aff.js uses for it (the org's, in this mode). */
   trackingToken?: string;
+  /** How long after a click a sign-up still counts for this program (attribution uses this, not the cookie's lifetime). */
+  cookieWindowDays?: number;
   settings?: { settlement?: string; widget?: { autoEnroll?: boolean; destinationUrl?: string | null } };
 }
 
@@ -283,7 +285,12 @@ async function trackingCheck(
   const out: Check[] = [];
   try {
     const cfg = await client.request<{ cookieWindowDays: number }>('GET', `/t/${encodeURIComponent(org.trackingToken)}/config.json`);
-    out.push({ id: 'tracking', status: 'ok', message: `tracking token ${org.trackingToken} answers; cookie window ${cfg.cookieWindowDays} days` });
+    // The cookie lives as long as the org's longest program window; each program attributes within its own (Upcify RF-U2).
+    const own = scope ? programs.filter((p) => p.cookieWindowDays !== undefined) : [];
+    const windows = own.length
+      ? `; attribution window ${own.map((p) => `${p.cookieWindowDays} days${own.length > 1 ? ` ("${p.name}")` : ''}`).join(', ')}${own.some((p) => p.cookieWindowDays !== cfg.cookieWindowDays) ? ` (the cookie is kept ${cfg.cookieWindowDays} days, the longest window of any program in the org)` : ''}`
+      : `; cookie kept ${cfg.cookieWindowDays} days (the longest program window)`;
+    out.push({ id: 'tracking', status: 'ok', message: `tracking token ${org.trackingToken} answers${windows}` });
   } catch (err) {
     if (!(err instanceof ApiError && err.status === 404)) throw err;
     out.push({ id: 'tracking', status: 'fail', message: `tracking token ${org.trackingToken} is unknown to /t/…/config.json`, fix: '/settings' });

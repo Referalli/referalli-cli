@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { load } from 'js-yaml';
 import type { Client } from './client.js';
 
@@ -108,10 +108,13 @@ const RULE_DEFAULTS = { appliesTo: 'gross', recurring: { type: 'lifetime' }, hol
 
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-function checkKeys(o: unknown, allowed: readonly string[], where: string, required?: string): asserts o is Obj {
+function checkKeys(o: unknown, allowed: readonly string[], where: string, required?: string, movedTo?: (k: string) => string | undefined): asserts o is Obj {
   if (!isObj(o)) throw new ConfigError(`${where}: expected a mapping`);
   for (const k of Object.keys(o)) {
     if (SECRET_KEYS.includes(k)) throw new ConfigError(`${where}: secrets never go in the file; name an environment variable instead (secretKeyEnv, stripeKeyEnv, apiKeyEnv, sharedSecretEnv, identitySecretEnv, credentialEnv)`);
+    // A field valid one level up or down (termsUrl under brand, widget fields on the program) says where it goes (Upcify RF-U4).
+    const there = allowed.includes(k) ? undefined : movedTo?.(k);
+    if (there) throw new ConfigError(`${where}: "${k}" is not a field here; it goes at ${there}`);
     if (!allowed.includes(k)) throw new ConfigError(`${where}: unknown field "${k}" (allowed: ${allowed.join(', ')})`);
   }
   if (required && (typeof o[required] !== 'string' || !o[required])) throw new ConfigError(`${where}: "${required}" is required`);
@@ -137,12 +140,15 @@ export function parseConfig(text: string, file = 'config'): ApplyConfig {
   const d = (doc ?? {}) as Obj;
   const programs = list(d.programs, 'programs').map((p, i) => {
     const where = `programs[${i}]`;
-    checkKeys(p, PROGRAM_KEYS, where, 'slug');
+    checkKeys(p, PROGRAM_KEYS, where, 'slug', (k) => {
+      const block = Object.entries(PROGRAM_BLOCKS).find(([, keys]) => (keys as readonly string[]).includes(k))?.[0];
+      return block ? `${where}.${block}.${k}` : undefined;
+    });
     if (p.commissionRule !== undefined && !isObj(p.commissionRule)) throw new ConfigError(`${where}.commissionRule: expected a mapping`);
     for (const [block, keys] of Object.entries(PROGRAM_BLOCKS)) {
       if (p[block] === undefined) continue;
       if (!isObj(p[block])) throw new ConfigError(`${where}.${block}: expected a mapping`);
-      checkKeys(p[block], [...keys], `${where}.${block}`);
+      checkKeys(p[block], [...keys], `${where}.${block}`, undefined, (k) => (PROGRAM_KEYS.includes(k) ? `${where}.${k} (one level up)` : undefined));
     }
     if (p.destinationUrl !== undefined && isObj(p.widget) && p.widget.destinationUrl !== undefined) {
       throw new ConfigError(`${where}: set destinationUrl or widget.destinationUrl, not both`);
@@ -891,11 +897,60 @@ export interface ApplyIo {
  * Plan (and with `apply`, perform) the file. Returns the exit code: 0, or 2
  * with `check` when anything would change.
  */
+type SecretFormat = 'json' | 'env';
+
+/** A secret's dotenv name: its label, upper snake case (the label goes above it as a comment). */
+export const secretEnvName = (label: string) => `REFERALLI_${label.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '')}`;
+
+/** The names an existing secret file already holds (refused up front when it can't be read in its format). */
+function existingSecretNames(path: string, format: SecretFormat): Set<string> {
+  const text = readFileSync(path, 'utf8');
+  if (format === 'env') return new Set(text.split('\n').map((l) => /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(l)?.[1]).filter((k): k is string => !!k));
+  try {
+    const o = JSON.parse(text) as unknown;
+    if (isObj(o)) return new Set(Object.keys(o));
+  } catch {
+    /* refused below */
+  }
+  throw new ConfigError(`--secret-file ${path} exists but isn't a JSON object; pick a new path (or --secret-format env for a .env file)`);
+}
+
+/**
+ * New secrets to the file, mode 600: a new file, or appended to an existing one when no name collides,
+ * through a temp file renamed over it so a crash never leaves it half written (Upcify RF-U3).
+ * On a collision they go to a new file beside it instead: secrets shown once are never dropped or overwritten.
+ */
+function saveSecrets(path: string, format: SecretFormat, secrets: Array<[string, string]>): string {
+  const entries = secrets.map(([label, value]) => [format === 'env' ? secretEnvName(label) : label, value, label] as const);
+  const render = (prefix: string) =>
+    format === 'env'
+      ? `${prefix}${entries.map(([k, v, label]) => `# ${label}\n${k}=${v}\n`).join('')}`
+      : `${JSON.stringify({ ...(prefix ? (JSON.parse(prefix) as Obj) : {}), ...Object.fromEntries(entries.map(([k, v]) => [k, v])) }, null, 2)}\n`;
+  if (!existsSync(path)) {
+    writeFileSync(path, render(''), { mode: 0o600, flag: 'wx' });
+    chmodSync(path, 0o600);
+    return path;
+  }
+  const have = existingSecretNames(path, format);
+  if (entries.some(([k]) => have.has(k))) {
+    const aside = `${path}.${Date.now()}`;
+    writeFileSync(aside, render(''), { mode: 0o600, flag: 'wx' });
+    chmodSync(aside, 0o600);
+    return aside;
+  }
+  const before = readFileSync(path, 'utf8');
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, render(format === 'env' ? (before === '' || before.endsWith('\n') ? before : `${before}\n`) : before), { mode: 0o600, flag: 'wx' });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, path);
+  return path;
+}
+
 export async function runApply(
   io: ApplyIo,
   client: Client,
   file: string,
-  opts: { apply: boolean; check: boolean; prune?: boolean; secretFile?: string },
+  opts: { apply: boolean; check: boolean; prune?: boolean; secretFile?: string; secretFormat?: string },
 ): Promise<number> {
   const config = parseConfig(readFileSync(file, 'utf8'), file);
   const { changes, ids } = await buildPlan(client, config, io.env, { prune: opts.prune });
@@ -908,7 +963,10 @@ export async function runApply(
   }
   if (!opts.apply || pending.length === 0) return 0;
   // Checked first: a secret file that can't be written after the creates would lose the secrets.
-  if (opts.secretFile && existsSync(opts.secretFile)) throw new ConfigError(`--secret-file ${opts.secretFile} already exists; pick a new path`);
+  const format: SecretFormat = opts.secretFormat === 'env' || (!opts.secretFormat && /\.env$|(^|\/)\.env[^/]*$/.test(opts.secretFile ?? '')) ? 'env' : 'json';
+  if (opts.secretFormat && !['env', 'json'].includes(opts.secretFormat)) throw new ConfigError('--secret-format is env or json');
+  // An existing file must be one we can add to; its names are checked again after the creates.
+  if (opts.secretFile && existsSync(opts.secretFile)) existingSecretNames(opts.secretFile, format);
   const ctx: RunCtx = { client, ids, out: (line) => io.out(line) };
   const secrets: Array<[string, string]> = [];
   try {
@@ -919,9 +977,12 @@ export async function runApply(
   } finally {
     // Even when a later change fails, secrets already issued are handed over: they can't be fetched again.
     if (secrets.length && opts.secretFile) {
-      writeFileSync(opts.secretFile, `${JSON.stringify(Object.fromEntries(secrets), null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-      chmodSync(opts.secretFile, 0o600);
-      io.out(`New secrets written to ${opts.secretFile} (mode 600). They are shown once.`);
+      const saved = saveSecrets(opts.secretFile, format, secrets);
+      io.out(
+        saved === opts.secretFile
+          ? `New secrets written to ${saved} (mode 600). They are shown once.`
+          : `${opts.secretFile} already has a secret with one of these names, so the new ones went to ${saved} (mode 600). They are shown once.`,
+      );
     } else if (secrets.length) {
       io.out('New secrets, shown once. Store them now:');
       for (const [label, value] of secrets) io.out(`  ${label}  ${value}`);
