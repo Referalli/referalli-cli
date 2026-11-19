@@ -5,6 +5,15 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.17 - 2026-11-19
+
+### Added
+- `doctor` checks that a billing connection's customerRef can match referrals (`health.billing.customer_ref_namespace.<id>`): it compares the shape of recent referral and billing customerRefs and the program's sign-in connection (an `accountId` key against Atlas user ids fails). It fails a program-scoped run too.
+- `doctor` with a program-scoped key skips nothing: payouts, email and the tracking token come from the new `GET /v1/programs/{id}/doctor-context`. `email.sender.<program>` names the sender each program mails from and warns on the shared Referalli sender or when no provider is configured (no email is sent). `billing.scope.<id>` flags an unscoped billing connection in an org with several programs.
+- `apply`: `customerRefMetadataKeys` on billing connections; a plan warning when the metadata key doesn't look like an Atlas id key for an Atlas program; the create response's `warnings` are printed.
+- `apply --env-out <file>` merges `NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN`, `REFERALLI_BILLING_CONNECTION_ID`, `REFERALLI_BILLING_SECRET` and `REFERALLI_API_KEY` into a dotenv file (mode 600, other lines kept).
+- Program config: `programKey: {name, scopes}` mints the product's own key with a `programs:create` bootstrap key (written to `--secret-file` or `--env-out`, never printed); `auth`, `consent.cookieMunch` and `integrations.lucida` are plan checks (reported as drift for `--check`, never changed by `apply`).
+
 ## 0.4.16 - 2026-11-18
 
 ### Added

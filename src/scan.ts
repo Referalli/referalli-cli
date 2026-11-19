@@ -11,7 +11,7 @@ const PUBLISHED = new Set(['cli', 'express', 'mcp', 'next', 'react', 'react-nati
 
 const packageName = (old: string) => {
   const name = old.slice('@referally/'.length);
-  if (name === 'sdk-js') return 'referalli';
+  if (name === 'sdk-js') return '@referalli/sdk';
   return PUBLISHED.has(name) ? `@referalli/${name}` : 'no published replacement';
 };
 

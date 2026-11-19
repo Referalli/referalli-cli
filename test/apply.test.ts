@@ -16,6 +16,7 @@ function fakeAccount() {
     conns: [] as Row[],
     auth: [] as Row[],
     payouts: [] as Row[],
+    cookiemunch: [] as Array<{ cbid: string; programIds: string[] | null }>,
     email: { provider: null, hasApiKey: false, fromAddress: null, fromName: null } as Record<string, unknown>,
     consent: { mode: 'none' } as Record<string, unknown>,
     hosted: { consent: { adapter: 'none', config: {} }, chat: null, customOrigins: {} } as Record<string, unknown>,
@@ -148,6 +149,8 @@ function fakeAccount() {
       (db.programs.find((p) => p.id === m![1])!.settings as Record<string, unknown>).refereeReward = enabled === false ? null : { kind: 'store_credit', ...reward, currency: String(reward.currency ?? 'usd').toLowerCase() };
       return ok({});
     }
+    if ((m = route.match(/^GET \/v1\/programs\/(\w+)$/))) return ok({ ...db.programs.find((p) => p.id === m![1])!, trackingToken: 'tok_abc' });
+    if (route === 'GET /v1/org/consent-partners/cookiemunch') return ok({ sitePrograms: db.cookiemunch });
     return new Response(JSON.stringify({ error: { code: 'not_found', message: route } }), { status: 404 });
   }) as typeof fetch;
   return { fetchFn, calls, db };
@@ -744,5 +747,106 @@ hostedPages:
     const bad = harness(acct, env);
     expect(await runCli(['plan', writeConfig('email:\n  apiKey: re_x\n')], bad.io)).toBe(1);
     expect(bad.text()).toContain('secrets never go in the file');
+  });
+});
+
+describe('referalli apply: env-out, program keys and checks', () => {
+  const FILE = `
+programs:
+  - slug: snap
+    name: Snap
+    programKey: { name: snap-app, scopes: [programs:read, commissions:write] }
+    auth: { provider: atlas, instanceId: ins_1 }
+    consent: { cookieMunch: { cbid: cb_1 } }
+    integrations: { lucida: { projectId: lp_1 } }
+billingConnections:
+  - name: snap-billing
+    provider: generic
+    programs: [snap]
+    customerRefMetadataKey: accountId
+`;
+
+  it('--env-out merges the tracking token, billing id and secret and the minted key into an existing file (0600), keeping other lines', async () => {
+    const acct = fakeAccount();
+    const envFile = join(dir(), '.env.local');
+    writeFileSync(envFile, '# mine\nFOO=bar\nREFERALLI_BILLING_SECRET=old\n');
+    const t = harness(acct);
+    expect(await runCli(['apply', writeConfig(FILE), '--env-out', envFile], t.io)).toBe(0);
+    const lines = readFileSync(envFile, 'utf8').split('\n');
+    expect(lines).toEqual([
+      '# mine',
+      'FOO=bar',
+      'REFERALLI_BILLING_SECRET=whsec_BILLINGSECRET',
+      'REFERALLI_API_KEY=rk_live_SECRETKEY',
+      'REFERALLI_BILLING_CONNECTION_ID=' + acct.db.conns[0]!.id,
+      'NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN=tok_abc',
+      '',
+    ]);
+    if (process.platform !== 'win32') expect(statSync(envFile).mode & 0o777).toBe(0o600);
+    // The minted key goes to the file only.
+    expect(t.text()).not.toContain('rk_live_SECRETKEY');
+    expect(t.text()).not.toContain('whsec_BILLINGSECRET');
+    // Needs you: the check-only items are reported, not changed.
+    expect(t.text()).toContain('Needs you (not changed by apply): auth atlas ins_1');
+    expect(acct.calls.filter((c) => c.method === 'POST' && c.path.startsWith('/v1/auth'))).toEqual([]);
+
+    // A second apply without a secret leaves the secret line alone.
+    const again = harness(acct);
+    expect(await runCli(['apply', writeConfig(FILE.replace(/ *programKey:.*\n/, '')), '--env-out', envFile], again.io)).toBe(0);
+    expect(readFileSync(envFile, 'utf8')).toContain('REFERALLI_BILLING_SECRET=whsec_BILLINGSECRET');
+
+    // With the key already in the env file, a rerun with programKey mints no second key.
+    const third = harness(acct);
+    const mints = () => acct.calls.filter((c) => c.method === 'POST' && c.path === '/v1/api-keys').length;
+    const before = mints();
+    expect(await runCli(['apply', writeConfig(FILE), '--env-out', envFile], third.io)).toBe(0);
+    expect(mints()).toBe(before);
+  });
+
+  it('a programKey is never printed: apply refuses without --secret-file or --env-out, and --secret-file takes it', async () => {
+    const acct = fakeAccount();
+    const t = harness(acct);
+    expect(await runCli(['apply', writeConfig(FILE)], t.io)).toBe(1);
+    expect(t.text()).toContain('never printed');
+    expect(acct.calls.filter((c) => c.method !== 'GET')).toEqual([]);
+    const secretFile = join(dir(), 's.json');
+    const ok = harness(acct);
+    expect(await runCli(['apply', writeConfig(FILE), '--secret-file', secretFile], ok.io)).toBe(0);
+    expect(ok.text()).not.toContain('rk_live_SECRETKEY');
+    expect(JSON.parse(readFileSync(secretFile, 'utf8'))['programKey snap-app']).toBe('rk_live_SECRETKEY');
+    const mint = acct.calls.find((c) => c.method === 'POST' && c.path === '/v1/api-keys')!;
+    expect(mint.body).toEqual({ name: 'snap-app', scopes: ['programs:read', 'commissions:write'], programIds: [acct.db.programs[0]!.id] });
+  });
+
+  it('plan --check reports a missing Atlas connection and a program not on cookiemunch; satisfied checks are unchanged', async () => {
+    const acct = fakeAccount();
+    await runCli(['apply', writeConfig('programs:\n  - slug: snap\n    name: Snap\n')], harness(acct).io);
+    const file = writeConfig(FILE.replace(/ {4}programKey.*\n/, '').replace(/billingConnections:[\s\S]*/, ''));
+    const drift = harness(acct);
+    expect(await runCli(['plan', file, '--check'], drift.io)).toBe(2);
+    expect(drift.text()).toContain('~ update auth atlas ins_1 on "snap" (check)');
+    expect(drift.text()).toContain('trackingConsent: null → "cookiemunch"');
+    // Make it match.
+    acct.db.auth.push({ id: 'acon_x', provider: 'atlas', programId: acct.db.programs[0]!.id, instanceId: 'ins_1', status: 'active' });
+    acct.db.programs[0]!.trackingConsent = 'cookiemunch';
+    acct.db.cookiemunch.push({ cbid: 'cb_1', programIds: null });
+    const fine = harness(acct);
+    const code = await runCli(['plan', file, '--check'], fine.io);
+    expect(fine.text()).toContain('= unchanged auth atlas ins_1 on "snap" (check)');
+    expect(fine.text()).toContain('= unchanged consent cookieMunch cb_1 on "snap" (check)');
+    expect(fine.text()).toContain("integrations lucida projectId lp_1 on \"snap\": can't read the org's integrations with this key");
+    expect(code).toBe(0);
+  });
+
+  it('warns when the billing metadata key does not look like an Atlas id key and the program signs in through Atlas', async () => {
+    const acct = fakeAccount();
+    await runCli(['apply', writeConfig('programs:\n  - slug: snap\n    name: Snap\n')], harness(acct).io);
+    acct.db.auth.push({ id: 'acon_x', provider: 'atlas', programId: acct.db.programs[0]!.id, instanceId: 'ins_1', status: 'active' });
+    const t = harness(acct);
+    await runCli(['plan', writeConfig(FILE.replace(/ {4}programKey.*\n| {4}auth:.*\n| {4}consent:.*\n| {4}integrations:.*\n/g, '')), '--check'], t.io);
+    expect(t.text()).toContain('Warning: billingConnection "snap-billing": customerRefMetadataKey "accountId" doesn\'t look like an Atlas user-id key');
+    const fine = harness(acct);
+    await runCli(['plan', writeConfig(FILE.replace(/ {4}programKey.*\n| {4}auth:.*\n| {4}consent:.*\n| {4}integrations:.*\n/g, '').replace('accountId', 'atlasUserId')), '--check'], fine.io);
+    expect(fine.text()).not.toContain('Warning:');
   });
 });

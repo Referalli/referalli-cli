@@ -294,8 +294,10 @@ async function trackingCheck(
   scope: string[] | null,
   /** A program-scoped key: no org read; the token comes from the program (the consent check runs from the programs). */
   scopedKey: { livemode: boolean } | null = null,
+  /** The token from doctor-context, for an API whose program GET lacks it. */
+  contextToken?: string,
 ): Promise<Check[]> {
-  const fromProgram = scopedKey ? programs.find((p) => p.trackingToken)?.trackingToken : undefined;
+  const fromProgram = scopedKey ? (programs.find((p) => p.trackingToken)?.trackingToken ?? contextToken) : undefined;
   if (scopedKey && !fromProgram) throw new ApiError(403, 'program_scoped_key', 'older API: no trackingToken on the program'); // skipped as before
   const org = fromProgram
     ? { trackingToken: fromProgram, livemode: scopedKey!.livemode }
@@ -362,11 +364,73 @@ async function healthChecks(client: Client, scope: string[] | null, billing: Bil
   return res.checks.filter((h) => !theirs(h)).map((h): Check => {
     const id = `health.${h.id}`;
     if (h.ok) return { id, status: 'ok', message: h.detail };
-    const severe = !scope && (h.severity === 'error' || h.severity === 'critical');
+    // The customerRef namespace check reads only this key's own connections (RLS), so it fails a scoped run too.
+    const severe = (!scope || h.id.startsWith('billing.customer_ref_namespace.')) && (h.severity === 'error' || h.severity === 'critical');
     const fix = [h.fix, h.docs].filter(Boolean).join(' ');
     const status = severe ? 'fail' : h.severity === 'info' ? 'info' : 'warn';
     return { id, status, message: h.detail, ...(fix ? { fix } : {}) };
   });
+}
+
+/** GET /v1/programs/{id}/doctor-context: the org-level settings a program uses, redacted, readable by a program-scoped key. */
+interface DoctorContext {
+  programId: string;
+  tracking: { trackingToken: string; scriptPath: string; consent: string };
+  payouts: { settlement: string; connections: Array<{ provider: string; env: string; status: string }> };
+  email: { source: 'program' | 'org' | 'platform' | 'none'; provider: string | null; fromAddress: string | null; domainStatus: string | null; sends: boolean };
+}
+
+/** The context of each program, or null when the API predates the endpoint (the checks then read the org directly). */
+async function loadContexts(client: Client, programs: Program[]): Promise<Map<string, DoctorContext> | null> {
+  try {
+    const all = await Promise.all(programs.map((p) => client.request<DoctorContext>('GET', `/v1/programs/${encodeURIComponent(p.id)}/doctor-context`)));
+    return new Map(all.map((c) => [c.programId, c]));
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 404 || err.status === 403)) return null;
+    throw err;
+  }
+}
+
+function payoutContextChecks(programs: Program[], ctxs: Map<string, DoctorContext>, live: boolean): Check[] {
+  const paying = programs.filter((p) => p.status === 'active' && (p.settings?.settlement ?? 'payout') === 'payout');
+  if (paying.length === 0) return [];
+  if (!live) return [{ id: 'payouts.connection', status: 'ok', message: 'test mode pays every method through the test rail' }];
+  const active = [...new Set([...ctxs.values()].flatMap((c) => c.payouts.connections.filter((x) => x.status === 'active').map((x) => x.provider)))];
+  if (active.length) return [{ id: 'payouts.connection', status: 'ok', message: `payout connection: ${active.join(', ')}` }];
+  const names = paying.map((p) => `"${p.name}"`).join(', ');
+  return [{ id: 'payouts.connection', status: 'warn', message: `no payout connection while ${names} settle by payout: partners can only be paid by hand`, fix: 'PUT /v1/payout-connections/{provider} (Settings → Payouts), or settlement: merchant_credit' }];
+}
+
+/** Which sender each program mails from today (REF-X5). Email is bring-your-own-key: with none configured nothing is sent unless the operator runs its own transport. */
+function emailContextChecks(programs: Program[], ctxs: Map<string, DoctorContext>): Check[] {
+  return programs.flatMap((p): Check[] => {
+    const e = ctxs.get(p.id)?.email;
+    if (!e) return [];
+    const id = `email.sender.${p.id}`;
+    const reviewing = p.publicPage?.autoApprove === false;
+    if (e.source === 'program' || e.source === 'org') {
+      const verify = e.domainStatus && e.domainStatus !== 'verified' && e.domainStatus !== 'unknown' ? ` (sending domain ${e.domainStatus})` : '';
+      const check: Check = { id, status: verify ? 'warn' : 'ok', message: `"${p.name}" mails from ${e.fromAddress ?? 'the provider default'} through ${e.provider} (${e.source === 'program' ? "the program's own" : "the org's"} provider)${verify}` };
+      return [verify ? { ...check, fix: 'POST /v1/email/settings/verify-domain' } : check];
+    }
+    if (e.source === 'platform') {
+      return [{ id, status: 'warn', message: `"${p.name}" has no bring-your-own sender: it mails from the shared Referalli sender ${e.fromAddress ?? ''}, not from your domain`, fix: 'PUT /v1/email/settings {"provider":"…","apiKey":"…","fromAddress":"…"}, or PUT /v1/programs/{id}/email-settings for one program' }];
+    }
+    return [{ id, status: reviewing ? 'warn' : 'info', message: `no email provider is configured for "${p.name}": no email is sent${reviewing ? ', and partners wait for approval without hearing back' : ''}`, fix: 'PUT /v1/email/settings {"provider":"…","apiKey":"…","fromAddress":"…"} (bring your own key), or PUT /v1/programs/{id}/email-settings for one program' }];
+  });
+}
+
+/** REF-B5: with several programs, a billing connection with no programIds is matched against every one of them. */
+function billingScopeChecks(conns: BillingConnection[], programCount: number): Check[] {
+  if (programCount < 2) return [];
+  return conns
+    .filter((c) => !c.programIds?.length && c.status !== 'deleted')
+    .map((c) => ({
+      id: `billing.scope.${c.id}`,
+      status: 'warn' as const,
+      message: `billing connection "${c.name || c.id}" has no programIds: its events can earn for referrals in any of the org's ${programCount} programs`,
+      fix: `PATCH /v1/billing/connections/${c.id} {"programIds":["prg_…"]}`,
+    }));
 }
 
 /** A program settling by payout with no payout connection: partners can only be paid by hand. Test mode pays through the test rail. */
@@ -492,11 +556,15 @@ async function e2eChecks(client: Client, programId: string, fetchFn: typeof fetc
     .request<{ trackingToken: string }>('GET', '/v1/org')
     .then((o) => o.trackingToken)
     .catch((err: unknown) => {
-      if (err instanceof ApiError && err.status === 403) return env.REFERALLI_TRACKING_TOKEN ?? env.NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN;
-      throw err;
+      if (!(err instanceof ApiError && err.status === 403)) throw err;
+      // A program key can't read the org, but doctor-context carries the (public) token.
+      return client
+        .request<DoctorContext>('GET', `/v1/programs/${encodeURIComponent(programId)}/doctor-context`)
+        .then((c) => c.tracking.trackingToken)
+        .catch(() => env.REFERALLI_TRACKING_TOKEN ?? env.NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN);
     });
   if (!trackingToken) {
-    return [{ id: 'e2e', status: 'warn', message: "skipped: this key can't read the org's tracking token", fix: 'set REFERALLI_TRACKING_TOKEN and run again' }];
+    return [{ id: 'e2e', status: 'warn', message: "skipped: the tracking token couldn't be read (older API)", fix: 'set REFERALLI_TRACKING_TOKEN and run again' }];
   }
   const live = me.apiKey?.livemode !== false;
   const scriptPath = `/t/${encodeURIComponent(trackingToken)}/aff.js`;
@@ -603,6 +671,9 @@ export async function runDoctor(io: Io, client: Client, flags: Flags, now = new 
   });
   // Read once: the billing checks and the health checks' tally both need it (health: empty if it can't be read; billing says why).
   const billingList = client.request<BillingConnection[] | { data: BillingConnection[] }>('GET', '/v1/billing/connections').then(rows);
+  // Read once: payouts, email and the tracking token come redacted from the API, so a program-scoped key skips nothing.
+  const contexts = await loadContexts(client, programs).catch(() => null);
+  const live = apiKey?.livemode !== false;
   const checks = [
     ...key,
     ...programChecks,
@@ -611,11 +682,13 @@ export async function runDoctor(io: Io, client: Client, flags: Flags, now = new 
         guard('webhooks', undefined, () => webhookChecks(client, scope, tally)),
         guard('billing', undefined, async () => billingChecks(scope, await billingList, tally)),
         orgWide('auth', () => authChecks(client, now, programs, scope, tally)),
-        orgWide('tracking', () => trackingCheck(client, io.env, programs, scope, scoped ? { livemode: apiKey?.livemode !== false } : null)),
+        orgWide('tracking', () => trackingCheck(client, io.env, programs, scope, scoped ? { livemode: live } : null, contexts?.values().next().value?.tracking.trackingToken)),
         ...(scoped && scope ? [guard('tracking.consent', undefined, async () => programConsentCheck(programs, scope))] : []),
         orgWide('health', async () => healthChecks(client, scope, await billingList.catch((): BillingConnection[] => []), tally)),
-        orgWide('payouts', () => payoutChecks(client, programs, apiKey?.livemode !== false)),
-        orgWide('email', () => emailChecks(client, programs)),
+        ...(contexts
+          ? [guard('payouts', undefined, async () => payoutContextChecks(programs, contexts, live)), guard('email', undefined, async () => emailContextChecks(programs, contexts))]
+          : [orgWide('payouts', () => payoutChecks(client, programs, live)), orgWide('email', () => emailChecks(client, programs))]),
+        ...(!scope ? [guard('billing.scope', undefined, async () => billingScopeChecks(await billingList, programs.length))] : []),
         guard('commissions', undefined, () => unpaidChecks(client, programs, now)),
         guard('join', undefined, () => joinChecks(client, programs, fetchFn)),
         ...(flags.e2e && program ? [guard('e2e', undefined, () => e2eChecks(client, program, fetchFn, io.env))] : []),

@@ -519,7 +519,7 @@ export async function apply(io: Io, positional: string | undefined, flags: Flags
   // `--file` as other ForgeDeck CLIs take it (convertmepls R6); the file is positional otherwise.
   const file = positional ?? (typeof flags.file === 'string' ? flags.file : undefined);
   if (positional && typeof flags.file === 'string' && flags.file !== positional) throw new CliError('give the config file once: positionally or with --file');
-  if (!file) throw new CliError(planOnly ? 'Usage: referalli plan <referalli.yaml> [--check] [--prune]' : 'Usage: referalli apply <referalli.yaml> [--plan] [--check] [--prune] [--secret-file PATH] [--secret-format env|json]');
+  if (!file) throw new CliError(planOnly ? 'Usage: referalli plan <referalli.yaml> [--check] [--prune]' : 'Usage: referalli apply <referalli.yaml> [--plan] [--check] [--prune] [--secret-file PATH] [--secret-format env|json] [--env-out PATH]');
   const { client } = signedIn(io);
   try {
     return await runApply(io, client, file, {
@@ -528,6 +528,7 @@ export async function apply(io: Io, positional: string | undefined, flags: Flags
       prune: flags.prune === true,
       secretFile: typeof flags['secret-file'] === 'string' ? flags['secret-file'] : undefined,
       secretFormat: typeof flags['secret-format'] === 'string' ? flags['secret-format'] : undefined,
+      envOut: typeof flags['env-out'] === 'string' ? flags['env-out'] : undefined,
     });
   } catch (err) {
     if (err instanceof ConfigError) throw new CliError(err.message);

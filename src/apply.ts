@@ -21,6 +21,14 @@ interface ProgramSpec extends Obj {
   commissionRule?: Obj;
   stripeCredits?: Obj & { secretKeyEnv?: string };
   refereeReward?: Obj | null;
+  /** Mint a program-scoped key for this program (needs a `programs:create` bootstrap key or an admin one); written to --secret-file / --env-out, never printed. */
+  programKey?: { name: string; scopes?: string[]; owner?: string };
+  /** Check only: the program has this sign-in connection. */
+  auth?: { provider: string; instanceId?: string };
+  /** Check only: the program's consent mode is cookiemunch, with this site registered. */
+  consent?: { cookieMunch?: { cbid: string } };
+  /** Check only: reported, never changed. */
+  integrations?: { lucida?: { projectId: string } };
 }
 interface WebhookSpec extends Obj {
   /** whe_…: matches the endpoint by id, so its url can change (R-10). */
@@ -87,11 +95,11 @@ const PROGRAM_BLOCKS = {
 } as const;
 // Blocks GET returns under `settings`.
 const SETTINGS_BLOCKS = ['riskPolicy', 'widget', 'notificationEmails'];
-const PROGRAM_KEYS = ['slug', ...PROGRAM_TOP, ...PROGRAM_SETTINGS, ...PROGRAM_PASS, ...Object.keys(PROGRAM_BLOCKS), 'destinationUrl', 'commissionRule', 'stripeCredits', 'refereeReward'];
+const PROGRAM_KEYS = ['slug', ...PROGRAM_TOP, ...PROGRAM_SETTINGS, ...PROGRAM_PASS, ...Object.keys(PROGRAM_BLOCKS), 'destinationUrl', 'commissionRule', 'stripeCredits', 'refereeReward', 'programKey', 'auth', 'consent', 'integrations'];
 const STRIPE_KEYS = ['enabled', 'referrerMatch', 'metadataKey', 'refereeRewards', 'balanceCurrency', 'createCustomerIfMissing', 'waitForCustomer', 'secretKeyEnv'];
 const WEBHOOK_KEYS = ['id', 'url', 'topics', 'programs', 'status', 'alertContacts', 'managedBy'];
 const API_KEY_KEYS = ['name', 'owner', 'mode', 'scopes', 'expiresInDays', 'programs', 'apiVersion'];
-const BILLING_KEYS = ['name', 'provider', 'programs', 'status', 'customerRefMetadataKey', 'filter', 'stripeKeyEnv'];
+const BILLING_KEYS = ['name', 'provider', 'programs', 'status', 'customerRefMetadataKey', 'customerRefMetadataKeys', 'filter', 'stripeKeyEnv'];
 // Compared only when listed. shortcut: no metadata keys (GET doesn't return them), so no drift check; set them with `referalli api`.
 const AUTH_FIELDS = ['name', 'status', 'autoEnrollUsers', 'destinationUrl', 'resolveBillingCustomers', 'signatureVersion', 'allowedOrigins'];
 const AUTH_KEYS = ['provider', 'program', 'instanceId', 'appId', 'tokenVerification', ...AUTH_FIELDS];
@@ -105,6 +113,15 @@ const SECTIONS = ['programs', 'webhooks', 'apiKeys', 'billingConnections', 'auth
 const SECRET_KEYS = ['secretKey', 'stripeKey', 'webhookSecret', 'credentials', 'apiKey', 'sharedSecret', 'identitySecret'];
 // What the API stores when a rule leaves these out (packages/commissions ruleConfigSchema).
 const RULE_DEFAULTS = { appliesTo: 'gross', recurring: { type: 'lifetime' }, holdDays: 30, rounding: 'half_even', overrides: [] };
+
+/** What `programKey` mints when the file names no scopes: the standard program-key set (the most a bootstrap key may hand out). */
+const DEFAULT_PROGRAM_KEY_SCOPES = [
+  'programs:read', 'programs:write', 'partners:read', 'commissions:read', 'commissions:write', 'billing:read', 'billing:write',
+  'webhooks:read', 'webhooks:write', 'connections:read', 'connections:write', 'links:read', 'referrals:read', 'events:write',
+];
+
+/** A metadata key that names an Atlas user id (atlas_user_id, atlasUserId, userId, sub…), as opposed to an account or org id. */
+const looksLikeAtlasIdKey = (k: string) => /atlas|^user[_.-]?id$|^sub$|^owner[_.-]?(user)?[_.-]?id$/i.test(k);
 
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v);
 
@@ -159,6 +176,23 @@ export function parseConfig(text: string, file = 'config'): ApplyConfig {
     }
     // null turns it off; a mapping is the PUT /v1/programs/{id}/referee-reward body.
     if (p.refereeReward !== undefined && p.refereeReward !== null && !isObj(p.refereeReward)) throw new ConfigError(`${where}.refereeReward: expected a mapping (or null to turn it off)`);
+    if (p.programKey !== undefined) {
+      checkKeys(p.programKey, ['name', 'scopes', 'owner'], `${where}.programKey`, 'name');
+      const sc = (p.programKey as Obj).scopes;
+      if (sc !== undefined && (!Array.isArray(sc) || sc.length === 0 || sc.some((x) => typeof x !== 'string'))) throw new ConfigError(`${where}.programKey.scopes: expected a list of scopes`);
+    }
+    if (p.auth !== undefined) {
+      checkKeys(p.auth, ['provider', 'instanceId'], `${where}.auth`, 'provider');
+      if (p.auth.provider === 'atlas' && (typeof p.auth.instanceId !== 'string' || !p.auth.instanceId)) throw new ConfigError(`${where}.auth: atlas needs an instanceId`);
+    }
+    if (p.consent !== undefined) {
+      checkKeys(p.consent, ['cookieMunch'], `${where}.consent`);
+      if (p.consent.cookieMunch !== undefined) checkKeys(p.consent.cookieMunch, ['cbid'], `${where}.consent.cookieMunch`, 'cbid');
+    }
+    if (p.integrations !== undefined) {
+      checkKeys(p.integrations, ['lucida'], `${where}.integrations`);
+      if (p.integrations.lucida !== undefined) checkKeys(p.integrations.lucida, ['projectId'], `${where}.integrations.lucida`, 'projectId');
+    }
     return p as ProgramSpec;
   });
   const slugs = programs.map((p) => p.slug);
@@ -183,6 +217,10 @@ export function parseConfig(text: string, file = 'config'): ApplyConfig {
     checkKeys(b, BILLING_KEYS, where, 'name');
     if (typeof b.provider !== 'string' || !b.provider) throw new ConfigError(`${where}: "provider" is required`);
     if (b.status !== undefined && b.status !== 'active' && b.status !== 'paused') throw new ConfigError(`${where}.status: active or paused`);
+    const keys = b.customerRefMetadataKeys;
+    if (keys !== undefined && (!Array.isArray(keys) || keys.length > 5 || keys.some((k) => typeof k !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(k)))) {
+      throw new ConfigError(`${where}.customerRefMetadataKeys: a list of at most 5 metadata keys`);
+    }
     if (b.stripeKeyEnv !== undefined && b.provider !== 'stripe') throw new ConfigError(`${where}: stripeKeyEnv is for provider "stripe"`);
     return b as BillingConnectionSpec;
   });
@@ -251,6 +289,8 @@ export interface Change {
   kind: string;
   label: string;
   fields: Field[];
+  /** A check the CLI can't fix (auth, consent): it counts as drift for --check, and apply reports it without changing anything. */
+  checkOnly?: boolean;
   /** Performs the change; returns once-shown secrets as [label, value]. */
   run?: (ctx: RunCtx) => Promise<Array<[string, string]>>;
 }
@@ -261,6 +301,8 @@ interface RunCtx {
   ids: Map<string, string>;
   /** Printed at once, never to --secret-file. */
   out(line: string): void;
+  /** Values for --env-out (REFERALLI_BILLING_SECRET, REFERALLI_API_KEY…), set by the changes that learn them. */
+  envOut: Map<string, string>;
 }
 
 interface ServerProgram {
@@ -311,8 +353,17 @@ export async function buildPlan(
   config: ApplyConfig,
   env: NodeJS.ProcessEnv,
   opts: { prune?: boolean } = {},
-): Promise<{ changes: Change[]; ids: Map<string, string> }> {
+): Promise<{ changes: Change[]; ids: Map<string, string>; envOut: Map<string, string>; warnings: string[] }> {
   const changes: Change[] = [];
+  const envOut = new Map<string, string>();
+  const warnings: string[] = [];
+  // Read lazily, at most once: a key that can't read them just skips the check that needs them.
+  const lazy = <T>(fn: () => Promise<T>) => {
+    let p: Promise<T | null> | undefined;
+    return () => (p ??= fn().catch(() => null));
+  };
+  type AuthConn = { id: string; provider: string; programId: string; instanceId?: string | null; status?: string };
+  const authList = lazy(() => listAll<AuthConn>(client, '/v1/auth/connections'));
   const programs = await listAll<ServerProgram>(client, '/v1/programs');
   const ids = new Map(programs.map((p) => [p.slug, p.id]));
   const slugOf = new Map(programs.map((p) => [p.id, p.slug]));
@@ -446,6 +497,75 @@ export async function buildPlan(
           return [];
         },
       });
+    }
+
+    // Checks the CLI reports and does not fix: the sign-in connection, the consent site, the Lucida project.
+    if (spec.auth) {
+      const a = spec.auth;
+      const label = `auth ${a.provider}${a.instanceId ? ` ${a.instanceId}` : ''} on "${spec.slug}" (check)`;
+      const conns = cur ? ((await authList()) ?? []).filter((c) => c.programId === cur.id) : [];
+      const hit = conns.find((c) => c.provider === a.provider && (c.instanceId ?? null) === (a.instanceId ?? null));
+      const fields: Field[] = !hit
+        ? [[a.instanceId ? 'instanceId' : 'provider', conns.map((c) => c.instanceId ?? c.provider).join(', ') || '(no sign-in connection)', a.instanceId ?? a.provider]]
+        : hit.status && hit.status !== 'active'
+          ? [['status', hit.status, 'active']]
+          : [];
+      changes.push({ action: fields.length ? 'update' : 'noop', kind: 'auth', label, fields, checkOnly: true });
+    }
+    if (spec.consent?.cookieMunch) {
+      const { cbid } = spec.consent.cookieMunch;
+      const live = cur ? ((cur.trackingConsent as string | null | undefined) ?? (cur.settings.trackingConsent as string | null | undefined) ?? null) : null;
+      const fields: Field[] = live === 'cookiemunch' ? [] : [['trackingConsent', live, 'cookiemunch']];
+      type Sites = { sitePrograms?: Array<{ cbid: string; programIds: string[] | null }> };
+      const sites = cur ? await client.request<Sites>('GET', '/v1/org/consent-partners/cookiemunch').catch(() => null) : null;
+      const site = sites?.sitePrograms?.find((x) => x.cbid === cbid);
+      if (cur && sites && (!site || (site.programIds && !site.programIds.includes(cur.id)))) {
+        fields.push(['cookiemunch site', site ? `registered for ${site.programIds!.join(', ')}` : '(not registered)', `${cbid} for this program (POST /v1/org/consent-partners/cookiemunch/link)`]);
+      }
+      changes.push({ action: fields.length ? 'update' : 'noop', kind: 'consent', label: `consent cookieMunch ${cbid} on "${spec.slug}" (check)`, fields, checkOnly: true });
+    }
+    if (spec.integrations?.lucida) {
+      // shortcut: the Lucida integration is org-level (host + key, PUT /v1/integrations/lucida) with no project id of its own, so the project id is only reported.
+      const live = await client.request<{ lucida?: { connected?: boolean } | null }>('GET', '/v1/integrations').catch(() => null);
+      const state = !live ? "can't read the org's integrations with this key" : live.lucida?.connected ? 'connected (org-level)' : 'not connected';
+      changes.push({
+        action: live && !live.lucida?.connected ? 'update' : 'noop',
+        kind: 'integration',
+        label: `integrations lucida projectId ${spec.integrations.lucida.projectId} on "${spec.slug}": ${state}; the project id is not stored by Referalli (check only)`,
+        fields: live && !live.lucida?.connected ? [['lucida', 'not connected', 'PUT /v1/integrations/lucida {host, apiKey}']] : [],
+        checkOnly: true,
+      });
+    }
+
+    // A program-scoped key for the product itself, minted by the bootstrap key (programs:create) or an admin one.
+    if (spec.programKey) {
+      const pk = spec.programKey;
+      const label = `programKey "${pk.name}" for "${spec.slug}"`;
+      const scopes = pk.scopes ?? DEFAULT_PROGRAM_KEY_SCOPES;
+      const keys = cur ? await listAll<{ id: string; name: string; revokedAt: string | null; programIds?: string[] | null }>(client, '/v1/api-keys').catch(() => null) : null;
+      const have = keys?.some((k) => k.name === pk.name && !k.revokedAt && (k.programIds ?? []).includes(cur!.id));
+      if (have) {
+        changes.push({ action: 'noop', kind: 'programKey', label, fields: [] });
+      } else {
+        if (cur) {
+          await client.request('POST', '/v1/api-keys?dryRun=1', { name: pk.name, scopes, programIds: [cur.id], ...(pk.owner ? { owner: pk.owner } : {}) }).catch((err: unknown) => {
+            throw new ConfigError(`${label}: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }
+        changes.push({
+          action: 'create',
+          kind: 'programKey',
+          label: keys === null && cur ? `${label} (this key can't list keys, so an existing one can't be seen: apply this once)` : label,
+          fields: [['scopes', undefined, scopes], ['programs', undefined, [spec.slug]]],
+          run: async (ctx) => {
+            const res = await create(ctx.client, '/v1/api-keys', 'programkey', `${spec.slug}\n${pk.name}`, { name: pk.name, scopes, programIds: [ctx.ids.get(spec.slug)!], ...(pk.owner ? { owner: pk.owner } : {}) });
+            // One key in the caller's mode (a pair only when the caller asked for both).
+            const minted = (res.key ?? (res.live as Obj | undefined)?.key) as string;
+            ctx.envOut.set('REFERALLI_API_KEY', minted);
+            return [[`programKey ${pk.name}`, minted]];
+          },
+        });
+      }
     }
   }
 
@@ -585,7 +705,7 @@ export async function buildPlan(
     }
   }
   if (config.billingConnections.length || pruning('billingConnections')) {
-    const conns = await listAll<{ id: string; name: string; provider: string; status: string; programIds: string[] | null; customerRefMetadataKey: string | null; filter: unknown }>(
+    const conns = await listAll<{ id: string; name: string; provider: string; status: string; programIds: string[] | null; customerRefMetadataKey: string | null; customerRefMetadataKeys?: string[]; filter: unknown }>(
       client,
       '/v1/billing/connections',
     );
@@ -597,9 +717,19 @@ export async function buildPlan(
       const cur = matches[0];
       // programs and status are always managed (like webhooks); the optional fields only when the file sets them (null clears).
       const want: Obj = { programs: sorted(spec.programs), status: spec.status ?? 'active' };
-      for (const k of ['customerRefMetadataKey', 'filter']) if (spec[k] !== undefined) want[k] = spec[k];
+      for (const k of ['customerRefMetadataKey', 'customerRefMetadataKeys', 'filter']) if (spec[k] !== undefined) want[k] = spec[k];
+      // REF-B2: an Atlas program reports referrals under the Atlas user id; a billing key holding another id never matches.
+      const refKeys = [spec.customerRefMetadataKey, ...((spec.customerRefMetadataKeys as string[] | undefined) ?? [])].filter((k): k is string => typeof k === 'string' && k !== '');
+      if (refKeys.length && !refKeys.some(looksLikeAtlasIdKey)) {
+        const programIdsOf = (spec.programs?.length ? spec.programs : config.programs.map((p) => p.slug)).map((sl) => ids.get(sl)).filter((x): x is string => Boolean(x));
+        const atlas = ((await authList()) ?? []).filter((a) => a.provider === 'atlas' && (!programIdsOf.length || programIdsOf.includes(a.programId)));
+        if (atlas.length) {
+          warnings.push(`${label}: customerRefMetadataKey "${refKeys.join('", "')}" doesn't look like an Atlas user-id key, but ${atlas.length === 1 ? 'its program signs' : 'its programs sign'} users in through Atlas, which reports referrals under the Atlas user id (user_…). If that metadata holds anything else (an account or org id), no payment will match a referral: check with referalli doctor (billing.customer_ref_namespace).`);
+        }
+      }
       const apiBody = (ctx: RunCtx, keys: string[]) =>
         Object.fromEntries(keys.map((k) => (k === 'programs' ? ['programIds', programIdsFor(ctx, spec.programs)] : [k, want[k]])));
+      if (cur && !envOut.has('REFERALLI_BILLING_CONNECTION_ID')) envOut.set('REFERALLI_BILLING_CONNECTION_ID', cur.id);
       if (!cur) {
         const key = spec.stripeKeyEnv;
         if (key && !env[key]) throw new ConfigError(`${label}: environment variable ${key} is not set`);
@@ -618,6 +748,11 @@ export async function buildPlan(
             const made = await create(ctx.client, '/v1/billing/connections', 'billing', spec.name, body);
             // POST takes no status: pause right after creating.
             if (status === 'paused') await ctx.client.request('PATCH', `/v1/billing/connections/${made.id as string}`, { status });
+            for (const w of (made.warnings as string[] | undefined) ?? []) ctx.out(`Warning: ${label}: ${w}`);
+            if (!ctx.envOut.has('REFERALLI_BILLING_CONNECTION_ID')) {
+              ctx.envOut.set('REFERALLI_BILLING_CONNECTION_ID', made.id as string);
+              if (made.status !== 'awaiting_secret' && typeof made.webhookSecret === 'string') ctx.envOut.set('REFERALLI_BILLING_SECRET', made.webhookSecret);
+            }
             // awaiting_secret: the generated secret can't verify this provider; the provider's own is set later with PUT …/secret.
             return typeof made.webhookSecret === 'string' && made.status !== 'awaiting_secret' ? [[label, made.webhookSecret]] : [];
           },
@@ -631,6 +766,7 @@ export async function buildPlan(
         programs: sorted((cur.programIds ?? []).map((id) => slugOf.get(id) ?? id)),
         status: cur.status === 'awaiting_secret' ? 'active' : cur.status,
         customerRefMetadataKey: cur.customerRefMetadataKey,
+        customerRefMetadataKeys: cur.customerRefMetadataKeys ?? [],
         filter: cur.filter,
       };
       const fields: Field[] = Object.keys(want).filter((k) => !same(now[k], want[k])).map((k) => [k, now[k], want[k]]);
@@ -838,7 +974,7 @@ export async function buildPlan(
       },
     });
   }
-  return { changes, ids };
+  return { changes, ids, envOut, warnings };
 }
 
 /** Edit distance, for "did you mean". */
@@ -947,14 +1083,53 @@ function saveSecrets(path: string, format: SecretFormat, secrets: Array<[string,
   return path;
 }
 
+/**
+ * --env-out: the values a product's .env needs, merged into the file (other lines kept, mode 600).
+ * The tracking token is public; the billing secret and the minted key are written only when this run has them.
+ */
+async function writeEnvOut(io: ApplyIo, client: Client, config: ApplyConfig, ids: Map<string, string>, learned: Map<string, string>, path: string): Promise<string> {
+  const vars = new Map(learned);
+  const first = config.programs.map((p) => ids.get(p.slug)).find(Boolean);
+  if (first) {
+    const prog = await client.request<{ trackingToken?: string }>('GET', `/v1/programs/${encodeURIComponent(first)}`).catch(() => null);
+    if (prog?.trackingToken) vars.set('NEXT_PUBLIC_REFERALLI_TRACKING_TOKEN', prog.trackingToken);
+  }
+  mergeEnvFile(path, vars);
+  const names = [...vars.keys()];
+  const missing = ['REFERALLI_BILLING_SECRET'].filter((k) => !vars.has(k) && config.billingConnections.length > 0);
+  return `Wrote ${names.join(', ') || 'nothing'} to ${path} (mode 600)${missing.length ? `; ${missing.join(', ')} left as it is (a secret is only known when this run creates it)` : ''}.`;
+}
+
+/** Set `vars` in a dotenv file: an existing line for a name is replaced in place, new names are appended, every other line stays. */
+export function mergeEnvFile(path: string, vars: Map<string, string>): void {
+  const before = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const lines = before === '' ? [] : before.replace(/\n$/, '').split('\n');
+  const left = new Map(vars);
+  const out = lines.map((l) => {
+    const name = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(l)?.[1];
+    if (name && left.has(name)) {
+      const v = left.get(name)!;
+      left.delete(name);
+      return `${name}=${v}`;
+    }
+    return l;
+  });
+  for (const [k, v] of left) out.push(`${k}=${v}`);
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, `${out.join('\n')}\n`, { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, path);
+}
+
 export async function runApply(
   io: ApplyIo,
   client: Client,
   file: string,
-  opts: { apply: boolean; check: boolean; prune?: boolean; secretFile?: string; secretFormat?: string },
+  opts: { apply: boolean; check: boolean; prune?: boolean; secretFile?: string; secretFormat?: string; envOut?: string },
 ): Promise<number> {
   const config = parseConfig(readFileSync(file, 'utf8'), file);
-  const { changes, ids } = await buildPlan(client, config, io.env, { prune: opts.prune });
+  const { changes, ids, envOut, warnings } = await buildPlan(client, config, io.env, { prune: opts.prune });
+  for (const w of warnings) io.out(`Warning: ${w}`);
   for (const line of formatPlan(changes)) io.out(line);
   // Deletes last: whatever the file adds is in place before anything goes.
   const pending = [...changes.filter((c) => c.action !== 'noop' && c.action !== 'delete'), ...changes.filter((c) => c.action === 'delete')];
@@ -962,16 +1137,30 @@ export async function runApply(
     if (pending.length) io.out('Drift: the account does not match the file.');
     return pending.length ? 2 : 0; // 2, not 1: CI can tell drift from an error
   }
-  if (!opts.apply || pending.length === 0) return 0;
+  if (!opts.apply) return 0;
+  const checkOnly = pending.filter((c) => c.checkOnly);
+  // A bootstrap key can't list keys, so the plan can't see a program key it minted before: the env file holding one counts as having it.
+  const keyOnFile = !!opts.envOut && existsSync(opts.envOut) && /^REFERALLI_API_KEY=\S/m.test(readFileSync(opts.envOut, 'utf8'));
+  const runnable = pending.filter((c) => !c.checkOnly && !(keyOnFile && c.kind === 'programKey'));
+  if (keyOnFile && pending.some((c) => c.kind === 'programKey')) io.out(`programKey: ${opts.envOut} already has REFERALLI_API_KEY, not minting another`);
+  for (const c of checkOnly) io.out(`Needs you (not changed by apply): ${c.label}`);
+  // A minted program key is never printed: it goes to a file.
+  if (runnable.some((c) => c.kind === 'programKey') && !opts.secretFile && !opts.envOut) {
+    throw new ConfigError('programKey mints a key that is never printed: pass --secret-file PATH or --env-out PATH to receive it');
+  }
+  if (runnable.length === 0) {
+    if (opts.envOut) io.out(await writeEnvOut(io, client, config, ids, envOut, opts.envOut));
+    return 0;
+  }
   // Checked first: a secret file that can't be written after the creates would lose the secrets.
   const format: SecretFormat = opts.secretFormat === 'env' || (!opts.secretFormat && /\.env$|(^|\/)\.env[^/]*$/.test(opts.secretFile ?? '')) ? 'env' : 'json';
   if (opts.secretFormat && !['env', 'json'].includes(opts.secretFormat)) throw new ConfigError('--secret-format is env or json');
   // An existing file must be one we can add to; its names are checked again after the creates.
   if (opts.secretFile && existsSync(opts.secretFile)) existingSecretNames(opts.secretFile, format);
-  const ctx: RunCtx = { client, ids, out: (line) => io.out(line) };
+  const ctx: RunCtx = { client, ids, out: (line) => io.out(line), envOut };
   const secrets: Array<[string, string]> = [];
   try {
-    for (const c of pending) {
+    for (const c of runnable) {
       secrets.push(...(await c.run!(ctx)));
       io.out(`${c.action === 'create' ? 'Created' : c.action === 'delete' ? 'Deleted' : 'Updated'} ${c.label}`);
     }
@@ -984,11 +1173,18 @@ export async function runApply(
           ? `New secrets written to ${saved} (mode 600). They are shown once.`
           : `${opts.secretFile} already has a secret with one of these names, so the new ones went to ${saved} (mode 600). They are shown once.`,
       );
-    } else if (secrets.length) {
-      io.out('New secrets, shown once. Store them now:');
-      for (const [label, value] of secrets) io.out(`  ${label}  ${value}`);
+    } else {
+      // A secret that --env-out writes to its file isn't printed as well.
+      const onFile = new Set(opts.envOut ? envOut.values() : []);
+      const shown = secrets.filter(([label, value]) => !label.startsWith('programKey ') && !onFile.has(value));
+      if (shown.length) {
+        io.out('New secrets, shown once. Store them now:');
+        for (const [label, value] of shown) io.out(`  ${label}  ${value}`);
+      }
     }
+    // In the finally too, so a failed later change can't lose a secret meant for the env file.
+    if (opts.envOut) io.out(await writeEnvOut(io, client, config, ids, envOut, opts.envOut));
   }
-  io.out(`Apply complete: ${pending.length} change(s).`);
+  io.out(`Apply complete: ${runnable.length} change(s).`);
   return 0;
 }
