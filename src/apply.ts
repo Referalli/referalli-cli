@@ -95,7 +95,7 @@ const PROGRAM_TOP = ['name', 'attributionModel', 'cookieWindowDays', 'signupToCo
 const PROGRAM_SETTINGS = [
   'probabilisticPolicy', 'selfReferralPolicy', 'splitCommissions', 'utmTemplate', 'allowPaidSearch', 'challengeLinks', 'settlement', 'creditRate',
   'payPerCall', 'cartWindowDays', 'caps', 'countries', 'storefronts', 'signupPaymentGraceMinutes', 'mobileApp', 'howItWorksMd', 'trafficSources',
-  'exclusiveWith', 'priority', 'allowedRange', 'attributionScope', 'productMatch', 'payoutTaxFormPolicy', 'recordCountry', 'merchantCreditBps',
+  'exclusiveWith', 'priority', 'allowedRange', 'attributionScope', 'productMatch', 'payoutTaxFormPolicy', 'recordCountry', 'merchantCreditBps', 'clawbackPaidReversals',
 ] as const;
 // Passed through to PATCH as-is; read back top-level, else under `settings` (R-07/R-22/R-31 fields).
 const PROGRAM_PASS = ['termsUrl', 'faqUrl', 'supportUrl', 'trackingConsent'] as const;

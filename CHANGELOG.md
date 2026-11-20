@@ -5,6 +5,11 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.19 - 2026-11-19
+
+### Added
+- The program setting `clawbackPaidReversals` in `referalli.yaml`.
+
 ## 0.4.18 - 2026-11-19
 
 ### Added
