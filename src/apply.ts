@@ -102,9 +102,9 @@ const PROGRAM_PASS = ['termsUrl', 'faqUrl', 'supportUrl', 'trackingConsent'] as 
 // Mappings merged into what's live: only the keys the file names are compared, and PATCH sends the live block with them applied.
 const PROGRAM_BLOCKS = {
   publicPage: ['pitch', 'autoApprove', 'noindex'],
-  riskPolicy: ['holdBotScore', 'holdRiskScore', 'holdHighRiskLevel', 'holdDisposableEmail', 'holdVelocity', 'holdUnverifiedEmail', 'holdSelfReferral'],
+  riskPolicy: ['holdBotScore', 'holdRiskScore', 'holdHighRiskLevel', 'holdDisposableEmail', 'holdVelocity', 'holdUnverifiedEmail', 'holdSelfReferral', 'minCustomerAgeDays', 'minCustomerAgeAction', 'requirePriorPayment'],
   widget: ['autoEnroll', 'destinationUrl'],
-  notificationEmails: ['enabled'],
+  notificationEmails: ['enabled', 'disabled'],
   brand: ['name', 'logoUrl', 'theme', 'supportUrl', 'linkDomain', 'portalDomain', 'emailFrom'],
 } as const;
 // Blocks GET returns under `settings`.
@@ -349,7 +349,9 @@ const canon = (v: unknown): string =>
   JSON.stringify(v, (_k, x: unknown) => (isObj(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b))) : x));
 const same = (a: unknown, b: unknown) => canon(a ?? null) === canon(b ?? null);
 /** Equal, except that a mapping only has to match on the keys `want` names (the API fills defaults into what it stores). */
-const covers = (live: unknown, want: unknown): boolean => (isObj(want) && isObj(live) ? Object.entries(want).every(([k, v]) => covers(live[k], v)) : same(live, want));
+// An empty list the API leaves out (notificationEmails.disabled: []) counts as matching.
+const covers = (live: unknown, want: unknown): boolean =>
+  isObj(want) && isObj(live) ? Object.entries(want).every(([k, v]) => covers(live[k], v)) : Array.isArray(want) && want.length === 0 && live == null ? true : same(live, want);
 const sorted = (v: string[] | null | undefined) => [...(v ?? [])].sort();
 
 /** An Idempotency-Key that is the same for a retry of the same create, and only for that. */

@@ -5,6 +5,11 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.20 - 2026-11-20
+
+### Added
+- `riskPolicy` accepts `minCustomerAgeDays`, `minCustomerAgeAction` and `requirePriorPayment`, and `notificationEmails` accepts `disabled`, like the API.
+
 ## 0.4.19 - 2026-11-19
 
 ### Added

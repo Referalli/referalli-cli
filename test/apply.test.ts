@@ -533,6 +533,23 @@ billingConnections:
     expect(bad.text()).toContain('autoapprove');
   });
 
+  it('RF-29: riskPolicy customer-age keys and notificationEmails.disabled plan and apply, then are in sync', async () => {
+    const acct = fakeAccount();
+    acct.db.programs.push({ id: 'prg_cw', slug: 'cw', name: 'cw', settings: { riskPolicy: { holdBotScore: 0.8 }, notificationEmails: { enabled: true } } });
+    const file = writeConfig(
+      'programs:\n  - slug: cw\n    notificationEmails: { enabled: false, disabled: ["*"] }\n    riskPolicy: { minCustomerAgeDays: 30, minCustomerAgeAction: hold, requirePriorPayment: void }\n',
+    );
+    const t = harness(acct, ENV);
+    expect(await runCli(['plan', file], t.io)).toBe(0);
+    expect(t.text()).toContain('~ update program "cw"');
+    expect(await runCli(['apply', file], harness(acct, ENV).io)).toBe(0);
+    expect(acct.calls.find((c) => c.method === 'PATCH')!.body).toEqual({
+      notificationEmails: { enabled: false, disabled: ['*'] },
+      riskPolicy: { holdBotScore: 0.8, minCustomerAgeDays: 30, minCustomerAgeAction: 'hold', requirePriorPayment: 'void' },
+    });
+    expect(await runCli(['plan', '--exit-code', file], harness(acct, ENV).io)).toBe(0);
+  });
+
   it('plans billing connections from the list envelope (FormFlow: conns.filter is not a function)', async () => {
     const acct = fakeAccount();
     acct.db.conns.push({ id: 'bcon_1', name: 'formflow-generic', provider: 'generic', status: 'active', programIds: null, customerRefMetadataKey: null, filter: null });
