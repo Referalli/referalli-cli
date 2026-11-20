@@ -5,6 +5,12 @@ All notable changes to `@referalli/cli` are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before 1.0, a minor
 bump may include breaking changes; they are called out under **Changed**.
 
+## 0.4.18 - 2026-11-19
+
+### Added
+- `apply` covers every settable program field (`attributionScope`, `productMatch`, `allowedRange`, `payoutTaxFormPolicy`, `merchantCreditBps`, `recordCountry`, `caps`, `countries`, `trafficSources`, `payPerCall`, `cartWindowDays`, `exclusiveWith`, `priority`, ...), `linked: [{source, windowDays, backfill}]`, per-program `payoutSchedule` and `emailSettings` (key from `apiKeyEnv`), and a top-level `payoutSchedule`.
+- `commissionRule` may be a list of `{effectiveAt, rule}` versions; a version is published only when none exists at that `effectiveAt`, and future ones show as pending. `plan --exit-code` exits 1 on drift (`--check` still exits 2).
+
 ## 0.4.17 - 2026-11-19
 
 ### Added

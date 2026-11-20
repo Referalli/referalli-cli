@@ -514,17 +514,18 @@ const SECRET_FIELDS = ['webhookSecret', 'secret', 'key'] as const;
 
 // --- plan / apply ------------------------------------------------------------------
 
-/** `referalli plan <file> [--prune]` / `referalli apply <file> [--plan] [--check] [--prune] [--secret-file PATH]`. */
+/** `referalli plan <file> [--prune]` / `referalli apply <file> [--plan] [--check|--exit-code] [--prune] [--secret-file PATH]`. */
 export async function apply(io: Io, positional: string | undefined, flags: Flags, planOnly: boolean): Promise<number> {
   // `--file` as other ForgeDeck CLIs take it (convertmepls R6); the file is positional otherwise.
   const file = positional ?? (typeof flags.file === 'string' ? flags.file : undefined);
   if (positional && typeof flags.file === 'string' && flags.file !== positional) throw new CliError('give the config file once: positionally or with --file');
-  if (!file) throw new CliError(planOnly ? 'Usage: referalli plan <referalli.yaml> [--check] [--prune]' : 'Usage: referalli apply <referalli.yaml> [--plan] [--check] [--prune] [--secret-file PATH] [--secret-format env|json] [--env-out PATH]');
+  if (!file) throw new CliError(planOnly ? 'Usage: referalli plan <referalli.yaml> [--check|--exit-code] [--prune]' : 'Usage: referalli apply <referalli.yaml> [--plan] [--check|--exit-code] [--prune] [--secret-file PATH] [--secret-format env|json] [--env-out PATH]');
   const { client } = signedIn(io);
   try {
     return await runApply(io, client, file, {
       apply: !planOnly && !flags.plan,
-      check: flags.check === true,
+      check: flags.check === true || flags['exit-code'] === true,
+      driftCode: flags.check === true ? 2 : 1,
       prune: flags.prune === true,
       secretFile: typeof flags['secret-file'] === 'string' ? flags['secret-file'] : undefined,
       secretFormat: typeof flags['secret-format'] === 'string' ? flags['secret-format'] : undefined,

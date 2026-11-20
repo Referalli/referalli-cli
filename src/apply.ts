@@ -18,7 +18,14 @@ type Obj = Record<string, unknown>;
 
 interface ProgramSpec extends Obj {
   slug: string;
-  commissionRule?: Obj;
+  /** One rule, or versions: [{ effectiveAt, rule }] (a version without effectiveAt is in force once published). */
+  commissionRule?: Obj | Array<{ effectiveAt?: string; rule: Obj }>;
+  /** Mirror referrals created in the source program (a slug) into this one. */
+  linked?: Array<{ source: string; windowDays: number; backfill?: boolean }>;
+  /** The program's own payout schedule: a schedule, { kind: off }, or null (follow the org's). */
+  payoutSchedule?: Obj | null;
+  /** The program's own email provider and sender (PUT /v1/programs/{id}/email-settings); the key comes from apiKeyEnv. */
+  emailSettings?: Obj & { apiKeyEnv?: string };
   stripeCredits?: Obj & { secretKeyEnv?: string };
   refereeReward?: Obj | null;
   /** Mint a program-scoped key for this program (needs a `programs:create` bootstrap key or an admin one); written to --secret-file / --env-out, never printed. */
@@ -75,6 +82,8 @@ export interface ApplyConfig {
   email?: Obj & { apiKeyEnv?: string };
   trackingConsent?: Obj;
   hostedPages?: Obj;
+  /** The org's payout schedule (PUT /v1/org/payout-schedule): a schedule, or null for off. */
+  payoutSchedule?: Obj | null;
   /** The top-level sections the file has (even empty): the kinds `--prune` manages. */
   sections: string[];
 }
@@ -82,12 +91,17 @@ export interface ApplyConfig {
 // Program fields compared against GET /v1/programs/{id} and sent as-is on PATCH.
 const PROGRAM_TOP = ['name', 'attributionModel', 'cookieWindowDays', 'signupToConversionDays', 'termsMd', 'status', 'publicHandle'] as const;
 // Program settings: PATCH takes them top-level, GET returns them under `settings`.
-const PROGRAM_SETTINGS = ['probabilisticPolicy', 'selfReferralPolicy', 'splitCommissions', 'allowPaidSearch', 'challengeLinks', 'settlement', 'creditRate', 'howItWorksMd'] as const;
+// One line per API setting (packages/api programs.ts SETTING_KEYS): a new API field needs one line here. Object values are compared by the keys the file names and sent whole (the API replaces the key).
+const PROGRAM_SETTINGS = [
+  'probabilisticPolicy', 'selfReferralPolicy', 'splitCommissions', 'utmTemplate', 'allowPaidSearch', 'challengeLinks', 'settlement', 'creditRate',
+  'payPerCall', 'cartWindowDays', 'caps', 'countries', 'storefronts', 'signupPaymentGraceMinutes', 'mobileApp', 'howItWorksMd', 'trafficSources',
+  'exclusiveWith', 'priority', 'allowedRange', 'attributionScope', 'productMatch', 'payoutTaxFormPolicy', 'recordCountry', 'merchantCreditBps',
+] as const;
 // Passed through to PATCH as-is; read back top-level, else under `settings` (R-07/R-22/R-31 fields).
 const PROGRAM_PASS = ['termsUrl', 'faqUrl', 'supportUrl', 'trackingConsent'] as const;
 // Mappings merged into what's live: only the keys the file names are compared, and PATCH sends the live block with them applied.
 const PROGRAM_BLOCKS = {
-  publicPage: ['pitch', 'autoApprove'],
+  publicPage: ['pitch', 'autoApprove', 'noindex'],
   riskPolicy: ['holdBotScore', 'holdRiskScore', 'holdHighRiskLevel', 'holdDisposableEmail', 'holdVelocity', 'holdUnverifiedEmail', 'holdSelfReferral'],
   widget: ['autoEnroll', 'destinationUrl'],
   notificationEmails: ['enabled'],
@@ -95,7 +109,7 @@ const PROGRAM_BLOCKS = {
 } as const;
 // Blocks GET returns under `settings`.
 const SETTINGS_BLOCKS = ['riskPolicy', 'widget', 'notificationEmails'];
-const PROGRAM_KEYS = ['slug', ...PROGRAM_TOP, ...PROGRAM_SETTINGS, ...PROGRAM_PASS, ...Object.keys(PROGRAM_BLOCKS), 'destinationUrl', 'commissionRule', 'stripeCredits', 'refereeReward', 'programKey', 'auth', 'consent', 'integrations'];
+const PROGRAM_KEYS = ['slug', ...PROGRAM_TOP, ...PROGRAM_SETTINGS, ...PROGRAM_PASS, ...Object.keys(PROGRAM_BLOCKS), 'destinationUrl', 'commissionRule', 'linked', 'payoutSchedule', 'emailSettings', 'stripeCredits', 'refereeReward', 'programKey', 'auth', 'consent', 'integrations'];
 const STRIPE_KEYS = ['enabled', 'referrerMatch', 'metadataKey', 'refereeRewards', 'balanceCurrency', 'createCustomerIfMissing', 'waitForCustomer', 'secretKeyEnv'];
 const WEBHOOK_KEYS = ['id', 'url', 'topics', 'programs', 'status', 'alertContacts', 'managedBy'];
 const API_KEY_KEYS = ['name', 'owner', 'mode', 'scopes', 'expiresInDays', 'programs', 'apiVersion'];
@@ -107,9 +121,10 @@ const AUTH_KEYS = ['provider', 'program', 'instanceId', 'appId', 'tokenVerificat
 const AUTH_PATCH_ONLY = ['status', 'resolveBillingCustomers', 'signatureVersion'];
 const AUTH_PROTOCOL = ['atlas', 'custom'];
 const PAYOUT_KEYS = ['provider', 'env', 'credentialEnv'];
+const PROGRAM_EMAIL_KEYS = ['provider', 'apiKeyEnv', 'endpointUrl', 'fromAddress', 'fromName', 'replyTo'];
 const EMAIL_KEYS = ['provider', 'apiKeyEnv', 'fromAddress', 'fromName', 'replyTo', 'defaultLocale', 'logoUrl', 'primaryColor'];
 const HOSTED_KEYS = ['consent', 'chat', 'customOrigins'];
-const SECTIONS = ['programs', 'webhooks', 'apiKeys', 'billingConnections', 'authConnections', 'payouts', 'email', 'trackingConsent', 'hostedPages'];
+const SECTIONS = ['programs', 'payoutSchedule', 'webhooks', 'apiKeys', 'billingConnections', 'authConnections', 'payouts', 'email', 'trackingConsent', 'hostedPages'];
 const SECRET_KEYS = ['secretKey', 'stripeKey', 'webhookSecret', 'credentials', 'apiKey', 'sharedSecret', 'identitySecret'];
 // What the API stores when a rule leaves these out (packages/commissions ruleConfigSchema).
 const RULE_DEFAULTS = { appliesTo: 'gross', recurring: { type: 'lifetime' }, holdDays: 30, rounding: 'half_even', overrides: [] };
@@ -161,7 +176,22 @@ export function parseConfig(text: string, file = 'config'): ApplyConfig {
       const block = Object.entries(PROGRAM_BLOCKS).find(([, keys]) => (keys as readonly string[]).includes(k))?.[0];
       return block ? `${where}.${block}.${k}` : undefined;
     });
-    if (p.commissionRule !== undefined && !isObj(p.commissionRule)) throw new ConfigError(`${where}.commissionRule: expected a mapping`);
+    if (Array.isArray(p.commissionRule)) {
+      if (p.commissionRule.length === 0) throw new ConfigError(`${where}.commissionRule: expected a rule or a non-empty list of { effectiveAt, rule }`);
+      p.commissionRule.forEach((v, j) => {
+        checkKeys(v, ['effectiveAt', 'rule'], `${where}.commissionRule[${j}]`);
+        if (!isObj(v.rule)) throw new ConfigError(`${where}.commissionRule[${j}]: "rule" is required (a mapping)`);
+        if (v.effectiveAt !== undefined && (typeof v.effectiveAt !== 'string' || Number.isNaN(Date.parse(v.effectiveAt)))) throw new ConfigError(`${where}.commissionRule[${j}].effectiveAt: expected an ISO 8601 date-time`);
+      });
+    } else if (p.commissionRule !== undefined && !isObj(p.commissionRule)) throw new ConfigError(`${where}.commissionRule: expected a mapping, or a list of { effectiveAt, rule }`);
+    if (p.linked !== undefined) {
+      list(p.linked, `${where}.linked`).forEach((l, j) => {
+        checkKeys(l, ['source', 'windowDays', 'backfill'], `${where}.linked[${j}]`, 'source');
+        if (!Number.isInteger(l.windowDays)) throw new ConfigError(`${where}.linked[${j}]: "windowDays" (whole days) is required`);
+      });
+    }
+    if (p.emailSettings !== undefined) checkKeys(p.emailSettings, PROGRAM_EMAIL_KEYS, `${where}.emailSettings`, 'provider');
+    if (p.payoutSchedule !== undefined && p.payoutSchedule !== null && !isObj(p.payoutSchedule)) throw new ConfigError(`${where}.payoutSchedule: expected a mapping such as { kind: daily } (or null to follow the org's)`);
     for (const [block, keys] of Object.entries(PROGRAM_BLOCKS)) {
       if (p[block] === undefined) continue;
       if (!isObj(p[block])) throw new ConfigError(`${where}.${block}: expected a mapping`);
@@ -269,6 +299,8 @@ export function parseConfig(text: string, file = 'config'): ApplyConfig {
     else if (!isObj(d[key])) throw new ConfigError(`${key}: expected a mapping`);
     return d[key] as Obj;
   };
+  if (d.payoutSchedule !== undefined && d.payoutSchedule !== null && !isObj(d.payoutSchedule)) throw new ConfigError('payoutSchedule: expected a mapping such as { kind: daily } (or null for off)');
+  const payoutSchedule = d.payoutSchedule as Obj | null | undefined;
   const email = single('email', EMAIL_KEYS);
   const trackingConsent = single('trackingConsent');
   const hostedPages = single('hostedPages', HOSTED_KEYS);
@@ -277,7 +309,7 @@ export function parseConfig(text: string, file = 'config'): ApplyConfig {
     if (hostedPages.chat !== undefined && hostedPages.chat !== null) checkKeys(hostedPages.chat, ['adapter', 'config', 'identitySecretEnv'], 'hostedPages.chat', 'adapter');
   }
   const sections = SECTIONS.filter((k) => d[k] !== undefined);
-  return { programs, webhooks, apiKeys, billingConnections, authConnections, payouts, email, trackingConsent, hostedPages, sections };
+  return { programs, webhooks, apiKeys, billingConnections, authConnections, payouts, email, trackingConsent, hostedPages, payoutSchedule, sections };
 }
 
 // --- planning -------------------------------------------------------------------
@@ -316,6 +348,8 @@ interface ServerProgram {
 const canon = (v: unknown): string =>
   JSON.stringify(v, (_k, x: unknown) => (isObj(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b))) : x));
 const same = (a: unknown, b: unknown) => canon(a ?? null) === canon(b ?? null);
+/** Equal, except that a mapping only has to match on the keys `want` names (the API fills defaults into what it stores). */
+const covers = (live: unknown, want: unknown): boolean => (isObj(want) && isObj(live) ? Object.entries(want).every(([k, v]) => covers(live[k], v)) : same(live, want));
 const sorted = (v: string[] | null | undefined) => [...(v ?? [])].sort();
 
 /** An Idempotency-Key that is the same for a retry of the same create, and only for that. */
@@ -368,6 +402,7 @@ export async function buildPlan(
   const ids = new Map(programs.map((p) => [p.slug, p.id]));
   const slugOf = new Map(programs.map((p) => [p.id, p.slug]));
   const known = new Set([...ids.keys(), ...config.programs.map((p) => p.slug)]);
+  const scheduleList = lazy(() => client.request<{ schedule: Obj | null; programs: Array<{ programId: string; override: Obj | null }> }>('GET', '/v1/org/payout-schedule'));
   const checkRefs = (refs: string[] | undefined, where: string) => {
     for (const s of refs ?? []) if (!known.has(s)) throw new ConfigError(`${where}: unknown program "${s}"`);
   };
@@ -377,6 +412,8 @@ export async function buildPlan(
     const label = `program "${spec.slug}"`;
     const desired: Obj = {};
     for (const k of [...PROGRAM_TOP, ...PROGRAM_SETTINGS, ...PROGRAM_PASS, ...Object.keys(PROGRAM_BLOCKS), 'destinationUrl']) if (spec[k] !== undefined) desired[k] = spec[k];
+    // exclusiveWith takes program ids: slugs of programs on the account (or in this file) are translated.
+    if (Array.isArray(desired.exclusiveWith)) desired.exclusiveWith = desired.exclusiveWith.map((x) => ids.get(x as string) ?? x);
     if (!cur) {
       const { destinationUrl, ...rest } = desired;
       // POST takes the destination as the widget setting; PATCH moves it (and its links).
@@ -404,7 +441,7 @@ export async function buildPlan(
       // A block counts as changed only on the keys the file names; the new value is the live block with them applied.
       const want = (k: string, v: unknown) => (k in PROGRAM_BLOCKS ? { ...((now(k) as Obj | null) ?? {}), ...(v as Obj) } : v);
       const fields: Field[] = Object.entries(desired)
-        .filter(([k, v]) => !same(now(k), want(k, v)))
+        .filter(([k, v]) => !covers(now(k), want(k, v)))
         .map(([k, v]) => [k, now(k), want(k, v)]);
       const patch = Object.fromEntries(fields.map(([k, , v]) => [k, v]));
       changes.push({
@@ -420,23 +457,120 @@ export async function buildPlan(
     }
 
     if (spec.commissionRule) {
-      const want = { ...RULE_DEFAULTS, ...spec.commissionRule };
-      // A draft accrues nothing: said on every plan, unchanged ones too (convertmepls R3).
-      const rlabel = `commissionRule "${spec.slug}"${spec.commissionRule.draft === true ? ' [draft: accrues nothing, terms hidden]' : ''}`;
-      const latest = cur ? (await listAll<{ id: string; version: number; config: Obj }>(client, `/v1/commission-rules?programId=${encodeURIComponent(cur.id)}`))[0] : undefined;
-      const publish = async (ctx: RunCtx) => {
-        const programId = ctx.ids.get(spec.slug)!;
-        // The version it replaces is in the key: re-applying an earlier config is a new version, not a replayed one.
-        await create(ctx.client, '/v1/commission-rules', 'rule', `${spec.slug}@v${latest?.version ?? 0}`, { programId, config: spec.commissionRule });
-        return [];
-      };
-      if (!latest) {
-        changes.push({ action: 'create', kind: 'commissionRule', label: rlabel, fields: Object.entries(spec.commissionRule).map(([k, v]) => [k, undefined, v]), run: publish });
-      } else {
-        const keys = [...new Set([...Object.keys(want), ...Object.keys(latest.config)])];
-        const fields: Field[] = keys.filter((k) => !same(latest.config[k], (want as Obj)[k])).map((k) => [k, latest.config[k], (want as Obj)[k]]);
-        changes.push({ action: fields.length ? 'update' : 'noop', kind: 'commissionRule', label: `${rlabel} (v${latest.version})`, fields, run: publish });
+      // A single rule, or versions: each is published once, matched by its effectiveAt (see below).
+      const versionsWanted = Array.isArray(spec.commissionRule) ? spec.commissionRule : [{ effectiveAt: undefined, rule: spec.commissionRule }];
+      type RuleVersion = { id: string; version: number; config: Obj; effectiveAt?: string | null };
+      // Newest version first, as the API lists them.
+      const existing = cur ? await listAll<RuleVersion>(client, `/v1/commission-rules?programId=${encodeURIComponent(cur.id)}`) : [];
+      const latest = existing[0];
+      const at = (v: { effectiveAt?: string | null }) => (v.effectiveAt ? Date.parse(v.effectiveAt) : null);
+      // Oldest effectiveAt first: version numbers follow the order they are published in. Versions without a date go first.
+      const ordered = [...versionsWanted].sort((x, y) => (at(x) ?? -Infinity) - (at(y) ?? -Infinity));
+      for (const v of ordered) {
+        const want = { ...RULE_DEFAULTS, ...v.rule };
+        // A draft accrues nothing: said on every plan, unchanged ones too (convertmepls R3).
+        const pending = at(v) !== null && at(v)! > Date.now() ? ` [pending: takes effect ${v.effectiveAt}]` : '';
+        const rlabel = `commissionRule "${spec.slug}"${v.effectiveAt ? ` @ ${v.effectiveAt}` : ''}${v.rule.draft === true ? ' [draft: accrues nothing, terms hidden]' : ''}${pending}`;
+        // Compared on the keys the file (and the defaults) name: the API stores more, and extra keys must not look like drift.
+        const diff = (c: Obj): Field[] => Object.keys(want).filter((k) => !same(c[k], (want as Obj)[k])).map((k) => [k, c[k], (want as Obj)[k]]);
+        const publish = async (ctx: RunCtx) => {
+          const programId = ctx.ids.get(spec.slug)!;
+          // Keyed by the date it takes effect (or the version it replaces): a retry replays, a new date is a new version.
+          await create(ctx.client, '/v1/commission-rules', 'rule', `${spec.slug}@${v.effectiveAt ?? `v${latest?.version ?? 0}`}`, { programId, config: v.rule, ...(v.effectiveAt ? { effectiveAt: v.effectiveAt } : {}) });
+          return [];
+        };
+        const fresh: Change = { action: 'create', kind: 'commissionRule', label: rlabel, fields: Object.entries(v.rule).map(([k, x]) => [k, undefined, x]), run: publish };
+        if (v.effectiveAt) {
+          // A version at this effectiveAt already exists: it is never published again (that would sit on top of any later versions).
+          // Versions are immutable, so a different config under the same date is reported, not changed: use a new effectiveAt.
+          const hit = existing.find((e) => at(e) === at(v));
+          if (!hit) changes.push(fresh);
+          else {
+            const fields = diff(hit.config);
+            changes.push({ action: 'noop', kind: 'commissionRule', label: `${rlabel} (v${hit.version})`, fields: [] });
+            if (fields.length) warnings.push(`${rlabel}: version ${hit.version} with this effectiveAt already exists with a different config (${fields.map(([k]) => k).join(', ')}); not re-published. Give the change a new effectiveAt.`);
+          }
+        } else if (!latest) changes.push(fresh);
+        else {
+          const fields = diff(latest.config);
+          changes.push({ action: fields.length ? 'update' : 'noop', kind: 'commissionRule', label: `${rlabel} (v${latest.version})`, fields, run: publish });
+        }
       }
+    }
+
+    if (spec.linked) {
+      type Link = { sourceProgramId: string; windowDays: number };
+      const live = cur ? await client.request<Link[]>('GET', `/v1/programs/${cur.id}/linked`) : [];
+      const wanted = new Set<string>();
+      for (const l of spec.linked) {
+        checkRefs([l.source], `program "${spec.slug}".linked`);
+        const sourceId = ids.get(l.source);
+        wanted.add(sourceId ?? l.source);
+        const have = sourceId ? live.find((x) => x.sourceProgramId === sourceId) : undefined;
+        const llabel = `linked "${spec.slug}" <- "${l.source}"`;
+        if (!have) {
+          changes.push({
+            action: 'create',
+            kind: 'linked',
+            label: llabel,
+            fields: [['windowDays', undefined, l.windowDays], ...(l.backfill ? [['backfill', undefined, true] as Field] : [])],
+            run: async (ctx) => {
+              await ctx.client.request('POST', `/v1/programs/${ctx.ids.get(spec.slug)}/linked`, { sourceProgramId: ctx.ids.get(l.source), windowDays: l.windowDays, ...(l.backfill ? { backfill: true } : {}) });
+              return [];
+            },
+          });
+        } else {
+          changes.push({ action: 'noop', kind: 'linked', label: llabel, fields: [] });
+          // shortcut: the API has no way to change a link's window; unlink it (DELETE /v1/programs/{id}/linked/{source}) and apply again.
+          if (have.windowDays !== l.windowDays) warnings.push(`${llabel}: windowDays is ${have.windowDays} on the account, ${l.windowDays} in the file; the API can't change a link's window. Unlink it (DELETE /v1/programs/${cur!.id}/linked/${sourceId}) and apply again.`);
+        }
+      }
+      if (cur && opts.prune && config.sections.includes('programs')) {
+        for (const x of live) if (!wanted.has(x.sourceProgramId)) changes.push({ action: 'delete', kind: 'linked', label: `linked "${spec.slug}" <- "${slugOf.get(x.sourceProgramId) ?? x.sourceProgramId}"`, fields: [], run: async (ctx) => { await ctx.client.request('DELETE', `/v1/programs/${cur.id}/linked/${x.sourceProgramId}`); return []; } });
+      }
+    }
+
+    if (spec.payoutSchedule !== undefined) {
+      const sched = await scheduleList();
+      const live = (sched?.programs.find((p) => p.programId === cur?.id)?.override as Obj | null | undefined) ?? null;
+      const want = spec.payoutSchedule;
+      changes.push({
+        action: !cur ? 'create' : covers(live, want) ? 'noop' : 'update',
+        kind: 'payoutSchedule',
+        label: `payoutSchedule "${spec.slug}"`,
+        fields: !cur || !covers(live, want) ? [['schedule', live, want]] : [],
+        run: async (ctx) => {
+          await ctx.client.request('PUT', `/v1/programs/${ctx.ids.get(spec.slug)}/payout-schedule`, { schedule: want });
+          return [];
+        },
+      });
+    }
+
+    if (spec.emailSettings) {
+      const { apiKeyEnv, ...want } = spec.emailSettings;
+      const live = cur ? await client.request<Obj & { configured?: boolean; hasApiKey?: boolean }>('GET', `/v1/programs/${cur.id}/email-settings`) : null;
+      const isNew = !live?.configured;
+      const fields: Field[] = Object.entries(want).filter(([k, v]) => isNew || !same(live![k], v)).map(([k, v]): Field => [k, live?.[k], v]);
+      // The key is write-only (the API says only hasApiKey): sent while none is stored or the provider changes.
+      const sendKey = Boolean(apiKeyEnv) && (isNew || !live!.hasApiKey || want.provider !== live!.provider);
+      if (sendKey) {
+        if (!env[apiKeyEnv!]) throw new ConfigError(`programs "${spec.slug}".emailSettings: environment variable ${apiKeyEnv} is not set`);
+        fields.push(['apiKey', live?.hasApiKey ? '(set)' : '(none)', `(from $${apiKeyEnv})`]);
+      }
+      if (want.provider !== 'webhook' && !sendKey && (isNew || !live!.hasApiKey || want.provider !== live!.provider)) {
+        throw new ConfigError(`programs "${spec.slug}".emailSettings: ${String(want.provider)} needs a key: set apiKeyEnv to an environment variable holding it`);
+      }
+      changes.push({
+        action: isNew ? 'create' : fields.length ? 'update' : 'noop',
+        kind: 'emailSettings',
+        label: `emailSettings "${spec.slug}"`,
+        fields,
+        run: async (ctx) => {
+          const res = await ctx.client.request<{ signingSecret?: string }>('PUT', `/v1/programs/${ctx.ids.get(spec.slug)}/email-settings`, { ...want, ...(sendKey ? { apiKey: env[apiKeyEnv!] } : {}) });
+          // The webhook provider makes its own signing secret when no key is sent: shown once.
+          return res.signingSecret ? [[`emailSettings ${spec.slug} signingSecret`, res.signingSecret]] : [];
+        },
+      });
     }
 
     if (spec.stripeCredits) {
@@ -900,6 +1034,23 @@ export async function buildPlan(
     }
   }
 
+  // Org payout schedule: the PUT replaces it; null is off.
+  if (config.payoutSchedule !== undefined) {
+    const live = (await scheduleList())?.schedule ?? null;
+    const want = config.payoutSchedule;
+    const differs = !covers(live, want);
+    changes.push({
+      action: differs ? 'update' : 'noop',
+      kind: 'payoutSchedule',
+      label: 'org payoutSchedule',
+      fields: differs ? [['schedule', live, want]] : [],
+      run: async (ctx) => {
+        await ctx.client.request('PUT', '/v1/org/payout-schedule', { schedule: want });
+        return [];
+      },
+    });
+  }
+
   // Email (R-11): PUT /v1/email/settings merges what it's sent; the key (BYOK) from apiKeyEnv, sent while none is stored or the provider changes.
   if (config.email) {
     const { apiKeyEnv, ...want } = config.email;
@@ -1125,7 +1276,7 @@ export async function runApply(
   io: ApplyIo,
   client: Client,
   file: string,
-  opts: { apply: boolean; check: boolean; prune?: boolean; secretFile?: string; secretFormat?: string; envOut?: string },
+  opts: { apply: boolean; check: boolean; driftCode?: number; prune?: boolean; secretFile?: string; secretFormat?: string; envOut?: string },
 ): Promise<number> {
   const config = parseConfig(readFileSync(file, 'utf8'), file);
   const { changes, ids, envOut, warnings } = await buildPlan(client, config, io.env, { prune: opts.prune });
@@ -1135,7 +1286,7 @@ export async function runApply(
   const pending = [...changes.filter((c) => c.action !== 'noop' && c.action !== 'delete'), ...changes.filter((c) => c.action === 'delete')];
   if (opts.check) {
     if (pending.length) io.out('Drift: the account does not match the file.');
-    return pending.length ? 2 : 0; // 2, not 1: CI can tell drift from an error
+    return pending.length ? (opts.driftCode ?? 2) : 0; // --check: 2, so CI can tell drift from an error (1); --exit-code: 1
   }
   if (!opts.apply) return 0;
   const checkOnly = pending.filter((c) => c.checkOnly);

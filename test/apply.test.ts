@@ -5,6 +5,9 @@ import { describe, expect, it } from 'vitest';
 import { runCli, type Io } from '../src/index.js';
 
 /** An in-memory account behind the /v1 routes `plan`/`apply` use; records every call. */
+// Settings GET /v1/programs/{id} returns under `settings`; the fake files these there (the real API defaults them too).
+const NEW_SETTINGS = ['attributionScope', 'productMatch', 'allowedRange', 'payoutTaxFormPolicy', 'merchantCreditBps', 'recordCountry', 'caps', 'priority'];
+
 function fakeAccount() {
   type Row = Record<string, unknown> & { id: string };
   const db = {
@@ -20,6 +23,10 @@ function fakeAccount() {
     email: { provider: null, hasApiKey: false, fromAddress: null, fromName: null } as Record<string, unknown>,
     consent: { mode: 'none' } as Record<string, unknown>,
     hosted: { consent: { adapter: 'none', config: {} }, chat: null, customOrigins: {} } as Record<string, unknown>,
+    links: [] as Array<{ programId: string; sourceProgramId: string; windowDays: number }>,
+    orgSchedule: null as Record<string, unknown> | null,
+    schedules: new Map<string, Record<string, unknown>>(),
+    progEmail: new Map<string, Record<string, unknown>>(),
     selfKey: 'key_self',
     selfPrograms: null as string[] | null,
   };
@@ -36,8 +43,10 @@ function fakeAccount() {
     const ok = (x: unknown) => new Response(JSON.stringify(x), { status: 200 });
     if (route === 'GET /v1/programs') return ok({ object: 'list', data: db.programs, has_more: false }); // the 2026-11-01 envelope
     if (route === 'POST /v1/programs') {
-      const { widget, selfReferralPolicy, notificationEmails, howItWorksMd, ...rest } = body!;
+      const { widget, selfReferralPolicy, notificationEmails, howItWorksMd, ...restAll } = body!;
+      const rest = Object.fromEntries(Object.entries(restAll).filter(([k]) => !NEW_SETTINGS.includes(k)));
       const settings = {
+        ...Object.fromEntries(Object.entries(restAll).filter(([k]) => NEW_SETTINGS.includes(k))),
         selfReferralPolicy: selfReferralPolicy ?? 'review',
         widget: widget ?? { destinationUrl: null },
         notificationEmails: notificationEmails ?? { enabled: true },
@@ -54,7 +63,7 @@ function fakeAccount() {
       const settings = row.settings as Record<string, unknown>;
       if (destinationUrl) settings.widget = { destinationUrl };
       if (selfReferralPolicy) settings.selfReferralPolicy = selfReferralPolicy;
-      for (const k of ['riskPolicy', 'widget', 'notificationEmails', 'howItWorksMd']) {
+      for (const k of ['riskPolicy', 'widget', 'notificationEmails', 'howItWorksMd', ...NEW_SETTINGS]) {
         if (row[k] !== undefined) settings[k] = row[k]; // GET returns these under settings
         delete row[k];
       }
@@ -63,9 +72,26 @@ function fakeAccount() {
     if (route === 'GET /v1/commission-rules') return ok(db.rules.filter((r) => r.programId === u.searchParams.get('programId')).reverse());
     if (route === 'POST /v1/commission-rules') {
       const prior = db.rules.filter((r) => r.programId === body!.programId).length;
-      const row: Row = { id: id('crv'), programId: body!.programId, version: prior + 1, config: { appliesTo: 'gross', recurring: { type: 'lifetime' }, holdDays: 30, rounding: 'half_even', overrides: [], ...(body!.config as object) } };
+      const row: Row = { id: id('crv'), programId: body!.programId, version: prior + 1, effectiveAt: body!.effectiveAt ?? null, config: { appliesTo: 'gross', recurring: { type: 'lifetime' }, holdDays: 30, rounding: 'half_even', overrides: [], ...(body!.config as object) } };
       db.rules.push(row);
       return ok(row);
+    }
+    if ((m = route.match(/^(GET|POST) \/v1\/programs\/(\w+)\/linked$/))) {
+      if (m[1] === 'POST') db.links.push({ programId: m[2]!, sourceProgramId: String(body!.sourceProgramId), windowDays: Number(body!.windowDays) });
+      return ok(m[1] === 'POST' ? body : db.links.filter((l) => l.programId === m![2]));
+    }
+    if (route === 'GET /v1/org/payout-schedule') return ok({ schedule: db.orgSchedule, programs: db.programs.map((p) => ({ programId: p.id, override: db.schedules.get(p.id) ?? null })) });
+    if (route === 'PUT /v1/org/payout-schedule') return ok((db.orgSchedule = body!.schedule as Record<string, unknown>));
+    if ((m = route.match(/^PUT \/v1\/programs\/(\w+)\/payout-schedule$/))) {
+      db.schedules.set(m[1]!, body!.schedule as Record<string, unknown>);
+      return ok({});
+    }
+    if ((m = route.match(/^(GET|PUT) \/v1\/programs\/(\w+)\/email-settings$/))) {
+      if (m[1] === 'PUT') {
+        const { apiKey, ...rest } = body!;
+        db.progEmail.set(m[2]!, { configured: true, hasApiKey: Boolean(apiKey), ...rest });
+      }
+      return ok(db.progEmail.get(m[2]!) ?? { configured: false, hasApiKey: false });
     }
     if ((m = route.match(/^(GET|PUT) \/v1\/programs\/(\w+)\/stripe-credits$/))) {
       const pid = m[2]!;
@@ -848,5 +874,89 @@ billingConnections:
     const fine = harness(acct);
     await runCli(['plan', writeConfig(FILE.replace(/ {4}programKey.*\n| {4}auth:.*\n| {4}consent:.*\n| {4}integrations:.*\n/g, '').replace('accountId', 'atlasUserId')), '--check'], fine.io);
     expect(fine.text()).not.toContain('Warning:');
+  });
+
+  describe('program settings, linked programs, rule versions, --exit-code (RF-24)', () => {
+    const FULL = `
+payoutSchedule: { kind: daily }
+programs:
+  - slug: base
+    name: Base
+  - slug: full
+    name: Full
+    attributionScope: payment
+    productMatch: required
+    allowedRange: { minBps: 500, maxBps: 2500 }
+    payoutTaxFormPolicy: delegated
+    merchantCreditBps: 2500
+    recordCountry: false
+    priority: 5
+    caps: { conversionsPerMonth: 100 }
+    notificationEmails: { enabled: false }
+    payoutSchedule: { kind: daily }
+    emailSettings: { provider: resend, fromAddress: partners@example.com, apiKeyEnv: RESEND_KEY }
+    linked:
+      - { source: base, windowDays: 90, backfill: true }
+    commissionRule:
+      - effectiveAt: "2026-01-01T00:00:00.000Z"
+        rule: { base: { kind: percent, bps: 1000 } }
+      - effectiveAt: "2099-01-01T00:00:00.000Z"
+        rule: { base: { kind: percent, bps: 1500 } }
+`;
+    const env = { RESEND_KEY: 're_SECRETEMAILKEY' };
+
+    it('applies every field on an empty account, then plan --exit-code is 0 and nothing is re-posted', async () => {
+      const acct = fakeAccount();
+      const file = writeConfig(FULL);
+      const first = harness(acct, env);
+      expect(await runCli(['plan', file, '--exit-code'], first.io)).toBe(1);
+      expect(first.text()).toContain('[pending: takes effect 2099-01-01T00:00:00.000Z]');
+      expect(first.text()).not.toContain('re_SECRETEMAILKEY');
+      const a = harness(acct, env);
+      expect(await runCli(['apply', file], a.io)).toBe(0);
+      const full = acct.db.programs.find((p) => p.slug === 'full')!;
+      expect(full.settings).toMatchObject({ attributionScope: 'payment', productMatch: 'required', allowedRange: { minBps: 500, maxBps: 2500 }, payoutTaxFormPolicy: 'delegated', merchantCreditBps: 2500 });
+      expect(acct.db.orgSchedule).toEqual({ kind: 'daily' });
+      expect(acct.db.schedules.get(full.id)).toEqual({ kind: 'daily' });
+      expect(acct.db.links).toEqual([{ programId: full.id, sourceProgramId: acct.db.programs[0]!.id, windowDays: 90 }]);
+      expect(acct.calls.find((c) => c.path.endsWith('/linked') && c.method === 'POST')!.body).toMatchObject({ windowDays: 90, backfill: true });
+      expect(acct.db.rules).toHaveLength(2);
+      expect(acct.db.progEmail.get(full.id)).toMatchObject({ provider: 'resend', hasApiKey: true });
+
+      const second = harness(acct, env);
+      const before = acct.calls.length;
+      expect(await runCli(['plan', file, '--exit-code'], second.io)).toBe(0);
+      expect(await runCli(['plan', file, '--check'], harness(acct, env).io)).toBe(0);
+      const again = harness(acct, env);
+      expect(await runCli(['apply', file], again.io)).toBe(0);
+      expect(acct.calls.slice(before).filter((c) => c.method !== 'GET')).toEqual([]);
+      expect(acct.db.rules).toHaveLength(2);
+    });
+
+    it('exits 1 on drift with --exit-code (2 with --check)', async () => {
+      const acct = fakeAccount();
+      const file = writeConfig('programs:\n  - slug: a\n    name: A\n    attributionScope: payment\n');
+      await runCli(['apply', file], harness(acct).io);
+      acct.db.programs[0]!.settings = { ...(acct.db.programs[0]!.settings as object), attributionScope: 'customer' };
+      expect(await runCli(['plan', file, '--exit-code'], harness(acct).io)).toBe(1);
+      expect(await runCli(['plan', file, '--check'], harness(acct).io)).toBe(2);
+    });
+
+    it('never publishes a rule version that exists, even when a later one does', async () => {
+      const acct = fakeAccount();
+      const rules = (extra = '') => writeConfig(`programs:\n  - slug: a\n    name: A\n    commissionRule:\n      - effectiveAt: "2026-01-01T00:00:00.000Z"\n        rule: { base: { kind: percent, bps: 1000 } }\n${extra}`);
+      await runCli(['apply', rules()], harness(acct).io);
+      const later = rules('      - effectiveAt: "2026-06-01T00:00:00.000Z"\n        rule: { base: { kind: percent, bps: 2000 } }\n');
+      await runCli(['apply', later], harness(acct).io);
+      await runCli(['apply', later], harness(acct).io);
+      expect(acct.db.rules.map((r) => r.effectiveAt)).toEqual(['2026-01-01T00:00:00.000Z', '2026-06-01T00:00:00.000Z']);
+    });
+
+    it('still rejects unknown fields and says which are allowed', async () => {
+      const t = harness(fakeAccount());
+      expect(await runCli(['plan', writeConfig('programs:\n  - slug: a\n    attributionScop: payment\n')], t.io)).toBe(1);
+      expect(t.text()).toContain('unknown field "attributionScop" (allowed: slug, name,');
+      expect(t.text()).toContain('attributionScope');
+    });
   });
 });
